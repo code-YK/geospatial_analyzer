@@ -75,10 +75,14 @@ graph TB
     D --> L
     E --> F
     F --> G
+    F -.->|err| L
     G --> H
+    G -.->|err| L
     H --> J
+    H -.->|err| L
     I --> K
     J --> K
+    J -.->|err| L
     L --> END["__end__"]
     K --> END
 
@@ -104,7 +108,7 @@ graph TB
 
 ## Agent Graph
 
-The system uses a **LangGraph StateGraph** with 9 nodes and conditional routing.
+The system uses a **LangGraph StateGraph** with 9 nodes and conditional routing. Every pipeline node checks for errors and routes to `error_handler` on failure.
 
 ```mermaid
 flowchart TD
@@ -117,14 +121,19 @@ flowchart TD
 
     advisory --> fetch_features
 
-    fetch_features --> fetch_scores
-    fetch_scores --> compute_score
+    fetch_features -->|ok| fetch_scores
+    fetch_features -.->|err| error_handler
 
-    compute_score --> explainability
-    compute_score --> geospatial
+    fetch_scores -->|ok| compute_score
+    fetch_scores -.->|err| error_handler
+
+    compute_score -->|ok| explainability
+    compute_score -.->|err| error_handler
+
+    explainability -->|ok| insight
+    explainability -.->|err| error_handler
 
     geospatial --> insight
-    explainability --> insight
 
     insight --> END(["__end__"])
     error_handler --> END

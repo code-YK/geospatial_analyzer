@@ -9,7 +9,6 @@ Uses Postgres-backed checkpointer for state persistence.
 from typing import Any
 
 from langgraph.graph import END, StateGraph
-from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 from agents.state import AgentState
 from agents.advisory import advisory_node
@@ -306,12 +305,14 @@ def get_compiled_graph(checkpointer: Any = None):
     return graph.compile(checkpointer=checkpointer)
 
 
-async def create_checkpointer() -> AsyncPostgresSaver:
+async def create_checkpointer():
     """
     Create and set up an AsyncPostgresSaver using langgraph_checkpoint_url.
     Must be called once at application startup before the graph is invoked.
     Returns a ready-to-use checkpointer for passing to get_compiled_graph().
     """
+    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
     settings = get_settings()
     checkpointer = AsyncPostgresSaver.from_conn_string(
         settings.langgraph_checkpoint_url
