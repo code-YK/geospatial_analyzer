@@ -3,9 +3,10 @@ models/site.py — SiteInput, SiteFeatures, PrecomputedScores, SiteScore, Hotspo
                   CatchmentResult, ScoreBreakdown, and WhatIfResult Pydantic models.
 """
 
+from datetime import datetime
 from typing import Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from models.weights import WeightConfig
 
@@ -23,7 +24,9 @@ class SiteInput(BaseModel):
 # ── Feature / Score Models ────────────────────────────────────────────────
 
 class SiteFeatures(BaseModel):
-    """All columns for an H3 cell row from the site_features table (71 columns)."""
+    """All columns for an H3 cell row from the site_features table (72 columns)."""
+
+    model_config = ConfigDict(extra="ignore")
 
     # Layer 0 — Identifiers
     id: Optional[str] = None
@@ -33,6 +36,7 @@ class SiteFeatures(BaseModel):
     state: str = ""
     district: str = ""
     area_name: str = ""
+    geom: Optional[str] = None  # WKB hex string returned by asyncpg for GEOMETRY columns
 
     # Layer 1 — Demographics (WorldPop · Census 2011 · VIIRS)
     population_1km: Optional[float] = None
@@ -112,7 +116,7 @@ class SiteFeatures(BaseModel):
     infrastructure_score: Optional[float] = None
 
     # Metadata
-    last_updated: Optional[str] = None
+    last_updated: Optional[datetime] = None
 
 
 class PrecomputedScores(BaseModel):

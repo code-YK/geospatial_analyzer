@@ -75,7 +75,7 @@ async def advisory_node(state: AgentState) -> dict:
         )
 
     except Exception as exc:
-        logger.error("Advisory LLM call failed: %s — falling back to defaults", exc)
+        logger.error("Advisory LLM call failed: %s — falling back to defaults", exc, exc_info=True)
 
         # Fallback to hardcoded defaults
         fallback = get_default_weights(use_case)

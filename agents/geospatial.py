@@ -35,19 +35,7 @@ async def geospatial_node(state: AgentState) -> dict:
     try:
         async with factory() as db:
             if intent == "find_hotspots":
-                # Extract state from site_input or use a default
-                site_input = state.get("site_input")
-                state_name = ""
-                if site_input and hasattr(site_input, "h3_id") and site_input.h3_id:
-                    # Try to get state from features if available
-                    features = state.get("site_features")
-                    if features:
-                        state_name = features.state
-                if not state_name:
-                    # The CLI / API should have set this somewhere;
-                    # we'll check site_features or default
-                    features = state.get("site_features")
-                    state_name = features.state if features else "Gujarat"
+                state_name = state.get("state_name") or "Gujarat"
 
                 results = await detect_hotspots(
                     state=state_name,

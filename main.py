@@ -12,6 +12,7 @@ from api.routes import sites, scoring, comparison, hotspots
 from core.config import get_settings
 from core.database import dispose_engine, get_engine
 from core.logger import setup_logging, get_logger
+from agents.graph import create_checkpointer
 
 logger = get_logger(__name__)
 
@@ -32,9 +33,21 @@ async def lifespan(app: FastAPI):
     get_engine()
     logger.info("Database engine initialised")
 
+    # Set up LangGraph checkpointer for state persistence
+    try:
+        app.state.checkpointer = await create_checkpointer()
+        logger.info("LangGraph checkpointer initialised")
+    except Exception as exc:
+        logger.warning("LangGraph checkpointer unavailable: %s — running without persistence", exc)
+        app.state.checkpointer = None
+
     yield
 
     # Shutdown
+    if getattr(app.state, "checkpointer", None) is not None:
+        await app.state.checkpointer.conn.close()
+        logger.info("LangGraph checkpointer connection closed")
+
     await dispose_engine()
     logger.info("Database engine disposed — shutting down")
 

@@ -29,11 +29,13 @@ class AgentState(TypedDict, total=False):
     site_input: SiteInput
     user_weights: Optional[WeightConfig]
     comparison_sites: Optional[List[SiteInput]]
+    request_explanation: bool  # set True by CLI to trigger explain_result flow
 
     # ── Routing / flow control ────────────────────────────────────────
     intent: str  # "score_site" | "compare_sites" | "find_hotspots" | "explain_result" | "advise_weights"
     current_node: str
     error: Optional[str]
+    state_name: str  # populated by CLI for find_hotspots flow
 
     # ── Data payloads (populated by tools as graph progresses) ────────
     site_features: Optional[SiteFeatures]

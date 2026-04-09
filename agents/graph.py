@@ -9,12 +9,14 @@ Uses Postgres-backed checkpointer for state persistence.
 from typing import Any
 
 from langgraph.graph import END, StateGraph
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 from agents.state import AgentState
 from agents.advisory import advisory_node
 from agents.geospatial import geospatial_node
 from agents.insight import insight_node
 from agents.orchestrator import orchestrator_node
+from core.config import get_settings
 from core.database import get_session_factory
 from core.logger import get_logger
 from models.site import PrecomputedScores
@@ -115,6 +117,7 @@ async def compute_score_node(state: AgentState) -> dict:
     if intent == "compare_sites":
         comparison_sites = state.get("comparison_sites", [])
         all_scores = [site_score]
+        failed_count = 0
 
         if comparison_sites:
             factory = get_session_factory()
@@ -139,9 +142,16 @@ async def compute_score_node(state: AgentState) -> dict:
                         )
                         all_scores.append(comp_score)
                     except Exception as exc:
-                        logger.warning("Failed to score comparison site: %s", exc)
+                        logger.warning("Failed to score comparison site %s: %s", comp_site, exc)
+                        failed_count += 1
 
         updates["comparison_results"] = rank_sites(all_scores)
+
+        if failed_count:
+            updates["error"] = (
+                f"Warning: {failed_count} of {len(comparison_sites)} comparison "
+                f"site(s) could not be scored and were excluded from results."
+            )
 
     return updates
 
@@ -170,6 +180,7 @@ async def explainability_node(state: AgentState) -> dict:
 
     breakdown = compute_breakdown(site_score)
     updates["score_breakdown"] = breakdown
+    updates["final_score"] = site_score.site_readiness_score
 
     return updates
 
@@ -183,7 +194,7 @@ async def error_handler_node(state: AgentState) -> dict:
     }
 
 
-# ── Routing Function ─────────────────────────────────────────────────────
+# ── Routing Functions ────────────────────────────────────────────────────
 
 def route_after_orchestrator(state: AgentState) -> str:
     """Conditional routing based on detected intent."""
@@ -204,6 +215,22 @@ def route_after_orchestrator(state: AgentState) -> str:
     return routing.get(intent, "error_handler")
 
 
+def route_after_fetch_features(state: AgentState) -> str:
+    return "error_handler" if state.get("error") else "fetch_scores"
+
+
+def route_after_fetch_scores(state: AgentState) -> str:
+    return "error_handler" if state.get("error") else "compute_score"
+
+
+def route_after_compute_score(state: AgentState) -> str:
+    return "error_handler" if state.get("error") else "explainability"
+
+
+def route_after_explainability(state: AgentState) -> str:
+    return "error_handler" if state.get("error") else "insight"
+
+
 # ── Graph Builder ─────────────────────────────────────────────────────────
 
 def build_graph() -> StateGraph:
@@ -212,12 +239,12 @@ def build_graph() -> StateGraph:
 
     Node layout:
         START → orchestrator → [conditional routing]
-            ├─ advise_weights  → advisory → fetch_features → fetch_scores → compute_score → explainability → insight → END
-            ├─ score_site      → fetch_features → fetch_scores → compute_score → explainability → insight → END
-            ├─ compare_sites   → fetch_features → fetch_scores → compute_score → explainability → insight → END
+            ├─ advise_weights  → advisory → fetch_features →[err?]→ fetch_scores →[err?]→ compute_score →[err?]→ explainability →[err?]→ insight → END
+            ├─ score_site      → fetch_features →[err?]→ fetch_scores →[err?]→ compute_score →[err?]→ explainability →[err?]→ insight → END
+            ├─ compare_sites   → fetch_features →[err?]→ fetch_scores →[err?]→ compute_score →[err?]→ explainability →[err?]→ insight → END
+            ├─ explain_result  → fetch_features →[err?]→ fetch_scores →[err?]→ explainability →[err?]→ insight → END
             ├─ find_hotspots   → geospatial → insight → END
-            ├─ explain_result  → fetch_features → fetch_scores → explainability → insight → END
-            └─ error           → error_handler → END
+            └─ error from any node → error_handler → END
     """
     graph = StateGraph(AgentState)
 
@@ -247,15 +274,21 @@ def build_graph() -> StateGraph:
         },
     )
 
-    # ── Linear edges ─────────────────────────────────────────────────
+    # ── Linear edges (no error possible) ─────────────────────────────
     graph.add_edge("advisory", "fetch_features")
-    graph.add_edge("fetch_features", "fetch_scores")
-    graph.add_edge("fetch_scores", "compute_score")
-    graph.add_edge("compute_score", "explainability")
-    graph.add_edge("explainability", "insight")
     graph.add_edge("geospatial", "insight")
     graph.add_edge("insight", END)
     graph.add_edge("error_handler", END)
+
+    # ── Conditional edges (error → error_handler) ────────────────────
+    graph.add_conditional_edges("fetch_features", route_after_fetch_features,
+        {"fetch_scores": "fetch_scores", "error_handler": "error_handler"})
+    graph.add_conditional_edges("fetch_scores", route_after_fetch_scores,
+        {"compute_score": "compute_score", "error_handler": "error_handler"})
+    graph.add_conditional_edges("compute_score", route_after_compute_score,
+        {"explainability": "explainability", "error_handler": "error_handler"})
+    graph.add_conditional_edges("explainability", route_after_explainability,
+        {"insight": "insight", "error_handler": "error_handler"})
 
     return graph
 
@@ -267,12 +300,29 @@ def get_compiled_graph(checkpointer: Any = None):
     Parameters
     ----------
     checkpointer : optional
-        A LangGraph checkpointer (e.g. PostgresSaver) for state persistence.
+        A LangGraph checkpointer (e.g. AsyncPostgresSaver) for state persistence.
     """
     graph = build_graph()
     return graph.compile(checkpointer=checkpointer)
 
 
+async def create_checkpointer() -> AsyncPostgresSaver:
+    """
+    Create and set up an AsyncPostgresSaver using langgraph_checkpoint_url.
+    Must be called once at application startup before the graph is invoked.
+    Returns a ready-to-use checkpointer for passing to get_compiled_graph().
+    """
+    settings = get_settings()
+    checkpointer = AsyncPostgresSaver.from_conn_string(
+        settings.langgraph_checkpoint_url
+    )
+    await checkpointer.setup()
+    logger.info("LangGraph AsyncPostgresSaver checkpointer ready")
+    return checkpointer
+
+
 # ── Module-level compiled graph (for LangGraph Studio / CLI) ─────────────
-# langgraph.json references this as: ./agents/graph.py:graph
+# NOTE: This module-level export uses NO checkpointer — it is for LangGraph Studio
+# graph visualization only. For runtime use, call create_checkpointer() at startup
+# and pass the result to get_compiled_graph(checkpointer=cp).
 graph = get_compiled_graph()

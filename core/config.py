@@ -5,6 +5,7 @@ All configuration is loaded from environment variables / .env file.
 No hardcoded strings outside of this module and scoring/weights.py.
 """
 
+import functools
 from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -41,6 +42,7 @@ class Settings(BaseSettings):
     h3_resolution: int = 8
 
 
+@functools.lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """Return a cached Settings instance."""
     return Settings()

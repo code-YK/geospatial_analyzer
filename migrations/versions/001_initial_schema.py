@@ -1,4 +1,4 @@
-"""Initial schema — create site_features table with PostGIS extension.
+"""Initial schema — create site_features table (72 columns) with PostGIS extension.
 
 Revision ID: 001
 Revises:

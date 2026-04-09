@@ -1,0 +1,469 @@
+You are a senior Python engineer working on the geospatial_analyzer project (LangGraph + FastAPI + PostgreSQL + PostGIS).
+
+Apply ALL 17 fixes below in order. Rules:
+- Make each fix exactly as described. Do not refactor, rename, or restructure anything beyond what is specified.
+- Preserve all existing docstrings, type hints, and comments unless a fix explicitly modifies them.
+- Fixes marked [Architecture change] touch graph topology, AgentState fields, or async startup — apply them carefully and in full.
+- After applying ALL fixes, output a numbered confirmation list: fix number, file(s) changed, one-line summary of what changed.
+- If any fix has a prerequisite (e.g. fix #17 depends on fix #2), apply the prerequisite first.
+
+Prerequisite order to observe:
+  - Apply fix #2 before fix #17 (state_name field must exist before insight_node can read it)
+  - Apply fix #1 before fix #6 (orchestrator condition must be >= 1 before explain_result branch is added)
+  - Apply fix #4 before fix #9 (graph topology must be stable before checkpointer is wired)
+  - Apply fix #8 and fix #14 together (both touch models/site.py for the datetime import)
+
+
+--- Fix #1 [Critical]: compare_sites intent never fires with 2 sites (off-by-one) ---
+Files: agents/orchestrator.py
+
+The condition  if comparison_sites and len(comparison_sites) >= 2  is wrong. The CLI puts sites[0] in site_input and sites[1:] in comparison_sites, so with 2 total sites comparison_sites has length 1, the condition is false, and intent falls through to score_site — silently scoring only the first site.
+
+Fix: Change line ~62 in orchestrator_node to:
+
+  if comparison_sites and len(comparison_sites) >= 1:
+      updates["intent"] = "compare_sites"
+
+────────────────────────────────────────────────────────────
+
+--- Fix #2 [Critical]: state_name collected by CLI but never reaches geospatial_node ---
+Files: agents/state.py, cli.py, agents/geospatial.py
+
+_flow_find_hotspots() prompts for state_name but never includes it in initial_state. geospatial_node derives state from site_features (always None in hotspot flow) and falls back to hardcoded "Gujarat".
+
+Fix — 3 changes:
+
+1. agents/state.py — add to the "Routing / flow control" section:
+     state_name: str  # populated by CLI for find_hotspots flow
+
+2. cli.py — in _flow_find_hotspots(), add to initial_state dict:
+     "state_name": state_name,
+
+3. agents/geospatial.py — replace the entire state_name derivation block (lines ~40-52) with:
+     state_name = state.get("state_name") or "Gujarat"
+
+────────────────────────────────────────────────────────────
+
+--- Fix #3 [Critical]: Migration missing 9 columns present in SiteFeatures model ---
+Files: migrations/versions/001_initial_schema.py
+
+The CREATE TABLE block omits 9 columns that exist in SiteFeatures and are expected by the ETL pipeline.
+
+Fix: Add these 9 columns in their correct layer sections of the CREATE TABLE statement:
+
+  -- Layer 1: Demographics (add after income_level)
+  population_1km FLOAT,
+  population_5km FLOAT,
+
+  -- Layer 2: Transportation (add after connectivity_score)
+  avg_travel_time_10min FLOAT,
+  avg_travel_time_20min FLOAT,
+
+  -- Layer 3: POI (add after poi_count_2km — which is also missing, add before competitor_count)
+  poi_count_500m FLOAT,
+  poi_count_1km FLOAT,
+  poi_count_2km FLOAT,
+
+  -- Layer 5: Environment (add after aqi)
+  pm25 FLOAT,
+  pm10 FLOAT,
+
+Also update the migration docstring to reflect 72 total columns (not 71).
+
+────────────────────────────────────────────────────────────
+
+--- Fix #4 [Architecture change]: Mid-graph errors never reach error_handler — add conditional edges ---
+Files: agents/graph.py
+
+All post-orchestrator edges are linear. When fetch_features_node fails, the graph continues through fetch_scores → compute_score → explainability → insight with None inputs, accumulating errors silently. error_handler is completely unreachable from the middle of the pipeline.
+
+Fix: Replace the 4 linear edges with conditional routing. Add 4 routing functions and swap add_edge for add_conditional_edges for each affected hop.
+
+STEP 1 — Add these four routing functions directly above the build_graph() function:
+
+def route_after_fetch_features(state: AgentState) -> str:
+    return "error_handler" if state.get("error") else "fetch_scores"
+
+def route_after_fetch_scores(state: AgentState) -> str:
+    return "error_handler" if state.get("error") else "compute_score"
+
+def route_after_compute_score(state: AgentState) -> str:
+    return "error_handler" if state.get("error") else "explainability"
+
+def route_after_explainability(state: AgentState) -> str:
+    return "error_handler" if state.get("error") else "insight"
+
+STEP 2 — In build_graph(), REMOVE these 4 add_edge calls:
+  graph.add_edge("fetch_features", "fetch_scores")       # REMOVE
+  graph.add_edge("fetch_scores", "compute_score")        # REMOVE
+  graph.add_edge("compute_score", "explainability")      # REMOVE
+  graph.add_edge("explainability", "insight")            # REMOVE
+
+STEP 3 — Replace them with these 4 add_conditional_edges calls:
+  graph.add_conditional_edges("fetch_features", route_after_fetch_features,
+      {"fetch_scores": "fetch_scores", "error_handler": "error_handler"})
+  graph.add_conditional_edges("fetch_scores", route_after_fetch_scores,
+      {"compute_score": "compute_score", "error_handler": "error_handler"})
+  graph.add_conditional_edges("compute_score", route_after_compute_score,
+      {"explainability": "explainability", "error_handler": "error_handler"})
+  graph.add_conditional_edges("explainability", route_after_explainability,
+      {"insight": "insight", "error_handler": "error_handler"})
+
+STEP 4 — Update the build_graph() docstring to reflect the new topology:
+  ├─ score_site → fetch_features →[err?]→ fetch_scores →[err?]→ compute_score →[err?]→ explainability →[err?]→ insight → END
+  └─ error from any node → error_handler → END
+
+Keep the existing add_edge("advisory", "fetch_features") and add_edge("geospatial", "insight") unchanged.
+
+────────────────────────────────────────────────────────────
+
+--- Fix #5 [Critical]: langchain-community missing from all dependency files ---
+Files: pyproject.toml, requirements.txt
+
+llm_config.py imports from langchain_community.chat_models when provider == "ollama". langchain-community is declared in neither pyproject.toml nor requirements.txt.
+
+Fix:
+1. pyproject.toml — add to dependencies list:
+     "langchain-community>=0.2.0",
+
+2. requirements.txt — add line (uncommented):
+     langchain-community>=0.2.0
+
+────────────────────────────────────────────────────────────
+
+--- Fix #6 [Architecture change]: explain_result is dead code — wire up detection + CLI flow ---
+Files: agents/state.py, agents/orchestrator.py, agents/graph.py, agents/insight.py, cli.py
+
+The orchestrator never sets intent = "explain_result". The routing, graph docstring, and insight node all reference it but it is completely unreachable. Wire it up properly.
+
+The design: explain_result is triggered when a caller explicitly requests a detailed breakdown re-explanation of a site that has already been scored. It re-runs fetch_features → fetch_scores → explainability → insight but skips compute_score (score is re-derived from precomputed scores in explainability_node, which already calls compute_final_score internally).
+
+STEP 1 — agents/state.py: add one field to the Input section:
+  request_explanation: bool  # set True by CLI to trigger explain_result flow
+
+STEP 2 — agents/orchestrator.py: add a detection branch BEFORE the existing compare_sites check (it should be highest priority when explicitly requested):
+  if state.get("request_explanation") and site_input is not None:
+      updates["intent"] = "explain_result"
+  elif comparison_sites and len(comparison_sites) >= 1:  # (already fixed by issue #1)
+      ...
+
+STEP 3 — agents/graph.py route_after_orchestrator: the routing dict already has "explain_result": "fetch_features" — keep it. No change needed here.
+
+STEP 4 — agents/graph.py build_graph() docstring: update the explain_result line to:
+  ├─ explain_result → fetch_features →[err?]→ fetch_scores →[err?]→ explainability →[err?]→ insight → END
+  Note: explain_result skips compute_score. This is already the actual behavior because
+  explainability_node calls compute_final_score internally. No edge change needed.
+
+STEP 5 — agents/insight.py _build_user_prompt: the existing branch already handles explain_result
+  if intent in ("score_site", "advise_weights", "explain_result"):
+  Change this to give explain_result its own dedicated branch with a prompt that emphasizes
+  breakdown and dimension analysis rather than the overall score:
+
+  elif intent == "explain_result":
+      features = state.get("site_features")
+      breakdown = state.get("score_breakdown")
+      final_score = state.get("final_score", 0.0)
+      breakdown_text = ""
+      if breakdown:
+          for dim, contrib in breakdown.contributions.items():
+              breakdown_text += (
+                  f"  {dim}: raw={contrib.raw:.0f}, "
+                  f"weight={contrib.weight:.2f}, "
+                  f"contribution={contrib.contribution:.1f} "
+                  f"(rank #{contrib.rank})\n"
+              )
+      return INSIGHT_SCORE_USER_PROMPT.format(
+          use_case=state.get("use_case", ""),
+          state=getattr(features, "state", "N/A") if features else "N/A",
+          district=getattr(features, "district", "N/A") if features else "N/A",
+          area_name=getattr(features, "area_name", "N/A") if features else "N/A",
+          grid_id=getattr(features, "grid_id", "N/A") if features else "N/A",
+          lat=getattr(features, "latitude", 0) if features else 0,
+          lng=getattr(features, "longitude", 0) if features else 0,
+          population_density=getattr(features, "population_density", "N/A") if features else "N/A",
+          score_breakdown=breakdown_text or "N/A",
+          site_readiness_score=final_score,
+          strengths=", ".join(breakdown.strengths) if breakdown else "N/A",
+          weaknesses=", ".join(breakdown.weaknesses) if breakdown else "N/A",
+      )
+  Remove "explain_result" from the existing  if intent in ("score_site", "advise_weights", "explain_result")  tuple,
+  leaving it as  if intent in ("score_site", "advise_weights"):
+
+STEP 6 — cli.py: add a new flow function _flow_explain_result() and a menu option:
+
+  def _flow_explain_result():
+      """Flow 4: Re-explain a site score in detail."""
+      console.print("[bold]Explain Site Score[/]\n")
+      site_input = _get_site_input()
+      console.print("[bold]Step 2/3 — Use Case[/]")
+      use_case = _select_use_case()
+      weights = _get_weights(use_case)
+      thread_id = str(uuid.uuid4())
+      with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), console=console) as progress:
+          progress.add_task("Generating explanation...", total=None)
+          initial_state = {
+              "thread_id": thread_id,
+              "use_case": use_case,
+              "site_input": site_input,
+              "user_weights": weights,
+              "request_explanation": True,
+          }
+          try:
+              result = asyncio.run(_run_graph(initial_state))
+          except Exception as exc:
+              console.print(Panel(f"[red]{exc}[/]", title="Error", border_style="red"))
+              return
+      error = result.get("error")
+      if error:
+          console.print(Panel(f"[red]{error}[/]", title="Error", border_style="red"))
+          return
+      _render_score_result(result)
+
+  In the main() while loop, add:
+    console.print("  4. Explain a site score in detail")
+    console.print("  5. Exit")  # renumber Exit
+  And add the branch:
+    elif choice == 4:
+        try:
+            _flow_explain_result()
+        except Exception as exc:
+            console.print(Panel(f"[red]{exc}[/]", title="Error", border_style="red"))
+    elif choice == 5:
+        console.print("[bold bright_cyan]Goodbye! 👋[/]")
+        raise typer.Exit()
+
+────────────────────────────────────────────────────────────
+
+--- Fix #7 [Warning]: get_settings() uncached — re-parses .env on every call ---
+Files: core/config.py
+
+get_settings() calls Settings() on every invocation, re-reading .env on every node call, every tool call, and LLM init.
+
+Fix: Add lru_cache. Add  import functools  to the imports, then:
+
+  @functools.lru_cache(maxsize=1)
+  def get_settings() -> Settings:
+      """Return a cached Settings instance."""
+      return Settings()
+
+────────────────────────────────────────────────────────────
+
+--- Fix #8 [Warning]: last_updated type mismatch — DB returns datetime, model declares str ---
+Files: models/site.py
+
+The migration defines  last_updated TIMESTAMP DEFAULT NOW(). asyncpg returns Python datetime objects. SiteFeatures.last_updated is typed as Optional[str], causing silent coercion to repr-style strings like "2025-01-01 00:00:00".
+
+Fix: In models/site.py, add  from datetime import datetime  to imports and change the field:
+
+  last_updated: Optional[datetime] = None
+
+────────────────────────────────────────────────────────────
+
+--- Fix #9 [Architecture change]: Wire PostgresSaver checkpointer via langgraph_checkpoint_url ---
+Files: agents/graph.py, cli.py, main.py, core/config.py
+
+The module-level graph export has no checkpointer (checkpointer=None), making it memoryless. The module docstring says "Postgres-backed checkpointer" but this is not wired anywhere. langgraph_checkpoint_url is defined in config.py but never used.
+
+Fix — 4 changes:
+
+STEP 1 — agents/graph.py: add an async factory function for the checkpointer. Add these imports at the top:
+  from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+Add this new async function after get_compiled_graph():
+
+  async def create_checkpointer() -> AsyncPostgresSaver:
+      """
+      Create and set up an AsyncPostgresSaver using langgraph_checkpoint_url.
+      Must be called once at application startup before the graph is invoked.
+      Returns a ready-to-use checkpointer for passing to get_compiled_graph().
+      """
+      settings = get_settings()
+      checkpointer = AsyncPostgresSaver.from_conn_string(
+          settings.langgraph_checkpoint_url
+      )
+      await checkpointer.setup()
+      logger.info("LangGraph AsyncPostgresSaver checkpointer ready")
+      return checkpointer
+
+Update the module-level export comment at the bottom:
+  # NOTE: This module-level export uses NO checkpointer — it is for LangGraph Studio
+  # graph visualization only. For runtime use, call create_checkpointer() at startup
+  # and pass the result to get_compiled_graph(checkpointer=cp).
+  graph = get_compiled_graph()
+
+STEP 2 — cli.py: refactor to create the checkpointer once at startup. Change _run_graph to accept an optional checkpointer, and initialize it in main():
+
+  async def _run_graph(initial_state: dict, checkpointer=None) -> dict:
+      """Run the LangGraph graph and return the final state."""
+      compiled = get_compiled_graph(checkpointer=checkpointer)
+      config = {"configurable": {"thread_id": initial_state.get("thread_id", "cli")}}
+      return await compiled.ainvoke(initial_state, config=config)
+
+Change the existing  asyncio.run(_run_graph(initial_state))  calls in all three flow functions to pass the checkpointer:
+  result = asyncio.run(_run_graph(initial_state, checkpointer=_checkpointer))
+
+Add a module-level variable near the top of cli.py (after imports):
+  _checkpointer = None  # initialized in main() on first run
+
+In the main() @app.command() function, initialize the checkpointer once before entering the while loop:
+  global _checkpointer
+  if _checkpointer is None:
+      try:
+          _checkpointer = asyncio.run(_create_checkpointer_safe())
+      except Exception as exc:
+          logger.warning("Checkpointer unavailable, running without persistence: %s", exc)
+          _checkpointer = None
+
+Add this helper just above main():
+  async def _create_checkpointer_safe():
+      from agents.graph import create_checkpointer
+      return await create_checkpointer()
+
+STEP 3 — main.py (FastAPI lifespan): add checkpointer setup to the startup lifecycle:
+  Add this import at the top:
+    from agents.graph import create_checkpointer
+
+  In the lifespan async context manager, after  get_engine():
+    try:
+        app.state.checkpointer = await create_checkpointer()
+        logger.info("LangGraph checkpointer initialised")
+    except Exception as exc:
+        logger.warning("LangGraph checkpointer unavailable: %s — running without persistence", exc)
+        app.state.checkpointer = None
+
+  In the shutdown section, add:
+    if getattr(app.state, "checkpointer", None) is not None:
+        await app.state.checkpointer.conn.close()
+        logger.info("LangGraph checkpointer connection closed")
+
+STEP 4 — No change to core/config.py needed. langgraph_checkpoint_url is already correctly defined as  "postgresql://user:password@localhost:5432/geospatial_db"  (psycopg-style URL, correct for AsyncPostgresSaver — NOT asyncpg format).
+
+────────────────────────────────────────────────────────────
+
+--- Fix #10 [Warning]: advisory node swallows exceptions — no traceback logged ---
+Files: agents/advisory.py
+
+The except block logs only str(exc), hiding full stack traces for unexpected failures like Pydantic ValidationError or misconfigured API keys.
+
+Fix: Add exc_info=True to the logger.error call:
+
+  logger.error("Advisory LLM call failed: %s — falling back to defaults", exc, exc_info=True)
+
+────────────────────────────────────────────────────────────
+
+--- Fix #11 [Warning]: requirements.txt comments out langchain-openai and langchain-anthropic ---
+Files: requirements.txt
+
+pyproject.toml lists both as required dependencies but requirements.txt has them commented out. Installing from requirements.txt breaks OpenAI and Anthropic providers at runtime.
+
+Fix: Uncomment both lines in requirements.txt:
+  langchain-openai>=0.2.0
+  langchain-anthropic>=0.2.0
+
+────────────────────────────────────────────────────────────
+
+--- Fix #12 [Minor]: asyncio.run() creates and destroys event loop on every menu selection ---
+Files: cli.py
+
+Each flow function calls asyncio.run(_run_graph(...)), which creates a new event loop and destroys the SQLAlchemy connection pool on every menu selection. After issue #9 (checkpointer), re-creating the loop each time would also break the checkpointer's async connection.
+
+Fix: Refactor the three flow functions to be async def, and wrap the whole main() menu loop in a single asyncio.run():
+
+1. Change _flow_score_site, _flow_compare_sites, _flow_find_hotspots, _flow_explain_result to  async def.
+2. Inside each, replace  asyncio.run(_run_graph(initial_state, checkpointer=_checkpointer))  with  await _run_graph(initial_state, checkpointer=_checkpointer).
+3. Change the @app.command() main() to be a regular sync function that calls:
+     asyncio.run(_async_main())
+4. Extract the while-loop body into  async def _async_main()  which awaits each flow directly:
+     await _flow_score_site()  etc.
+   Move the checkpointer init into _async_main() as well (remove the global _checkpointer pattern):
+     checkpointer = await _create_checkpointer_safe()
+   Pass checkpointer as a parameter into each flow function.
+
+────────────────────────────────────────────────────────────
+
+--- Fix #13 [Minor]: SiteFeatures missing geom field — geometry silently dropped ---
+Files: models/site.py
+
+The site_features table has a  geom GEOMETRY(Point, 4326)  column. SiteFeatures has no geom field. Pydantic v2 silently ignores it (extra='ignore' is the default), but the geometry is lost on hydration and future code accessing site.geom will raise AttributeError with no clear error.
+
+Fix: Add model_config and the geom field to SiteFeatures:
+
+  from pydantic import BaseModel, ConfigDict, Field
+
+  class SiteFeatures(BaseModel):
+      model_config = ConfigDict(extra="ignore")
+      ...
+      # add after area_name in the Layer 0 identifiers section:
+      geom: Optional[str] = None  # WKB hex string returned by asyncpg for GEOMETRY columns
+
+────────────────────────────────────────────────────────────
+
+--- Fix #14 [Minor]: last_updated type mismatch also applies to model imports ---
+Files: models/site.py
+
+This is the import side of fix #8. Confirm that  from datetime import datetime  is added to the imports at the top of models/site.py (it may not currently be imported).
+
+Fix: Ensure the imports at the top of models/site.py include:
+  from datetime import datetime
+
+────────────────────────────────────────────────────────────
+
+--- Fix #15 [Minor]: Hotspot render table missing area_name column ---
+Files: cli.py
+
+HotspotResult.area_name is fetched from DB and stored in the model but never displayed. The CLI table shows Rank, District, State, Grid ID, Score — area_name is silently dropped.
+
+Fix: In _render_hotspots(), add an Area column:
+
+  table.add_column("Area", min_width=15)   # add after the "District" column
+
+In each table.add_row() call, add  hs.area_name or "—"  between district and state:
+  table.add_row(f"#{i}", hs.district, hs.area_name or "—", hs.state, hs.grid_id,
+                f"{hs.site_readiness_score:.1f}", style=style)
+
+────────────────────────────────────────────────────────────
+
+--- Fix #16 [Minor]: Comparison fetch errors silently drop sites from results ---
+Files: agents/graph.py
+
+In compute_score_node, per-site comparison failures are swallowed with logger.warning and the site is silently dropped. The user gets fewer results than expected with no explanation.
+
+Fix: Collect failure info and surface it as a non-fatal warning in state. After the comparison loop in compute_score_node, add:
+
+  failed_count = 0
+  for comp_site in comparison_sites:
+      try:
+          ...  # existing code
+      except Exception as exc:
+          logger.warning("Failed to score comparison site %s: %s", comp_site, exc)
+          failed_count += 1
+
+  if failed_count:
+      updates["error"] = (
+          f"Warning: {failed_count} of {len(comparison_sites)} comparison "
+          f"site(s) could not be scored and were excluded from results."
+      )
+
+This surfaces in the CLI's existing  result.get("error")  check without aborting the comparison.
+
+────────────────────────────────────────────────────────────
+
+--- Fix #17 [Minor]: insight_node uses wrong state_name for hotspot prompt after fix #2 ---
+Files: agents/insight.py
+
+After fix #2 adds state_name to AgentState, the hotspot branch in _build_user_prompt still reads:
+  state=getattr(features, "state", "India") if features else "India"
+
+site_features is always None in the hotspot flow, so this always renders "India" in the LLM prompt even after the fix.
+
+Fix: In the  elif intent == "find_hotspots":  branch of _build_user_prompt, replace the state derivation with:
+
+  state_label = state.get("state_name") or "India"
+  return INSIGHT_HOTSPOT_USER_PROMPT.format(
+      use_case=state.get("use_case", ""),
+      state=state_label,
+      top_n=len(hotspots or []),
+      hotspot_table="\n".join(table_lines) or "N/A",
+  )
+
+────────────────────────────────────────────────────────────

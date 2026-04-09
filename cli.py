@@ -223,6 +223,7 @@ def _render_hotspots(result: dict):
     table = Table(title="Top Hotspot Locations", show_header=True, header_style="bold cyan")
     table.add_column("Rank", justify="center", width=5)
     table.add_column("District", min_width=15)
+    table.add_column("Area", min_width=15)
     table.add_column("State", min_width=12)
     table.add_column("Grid ID", min_width=18)
     table.add_column("Score", justify="right", style="bold")
@@ -232,6 +233,7 @@ def _render_hotspots(result: dict):
         table.add_row(
             f"#{i}",
             hs.district,
+            hs.area_name or "—",
             hs.state,
             hs.grid_id,
             f"{hs.site_readiness_score:.1f}",
@@ -249,15 +251,16 @@ def _render_hotspots(result: dict):
 
 # ── Graph Runner ──────────────────────────────────────────────────────────
 
-async def _run_graph(initial_state: dict) -> dict:
+async def _run_graph(initial_state: dict, checkpointer=None) -> dict:
     """Run the LangGraph graph and return the final state."""
-    compiled = get_compiled_graph()
-    return await compiled.ainvoke(initial_state)
+    compiled = get_compiled_graph(checkpointer=checkpointer)
+    config = {"configurable": {"thread_id": initial_state.get("thread_id", "cli")}}
+    return await compiled.ainvoke(initial_state, config=config)
 
 
-# ── CLI Flows ─────────────────────────────────────────────────────────────
+# ── CLI Flows (async) ────────────────────────────────────────────────────
 
-def _flow_score_site():
+async def _flow_score_site(checkpointer=None):
     """Flow 1: Score a single site."""
     site_input = _get_site_input()
 
@@ -283,7 +286,7 @@ def _flow_score_site():
         }
 
         try:
-            result = asyncio.run(_run_graph(initial_state))
+            result = await _run_graph(initial_state, checkpointer=checkpointer)
         except Exception as exc:
             console.print(Panel(f"[red]{exc}[/]", title="Error", border_style="red"))
             return
@@ -296,7 +299,7 @@ def _flow_score_site():
     _render_score_result(result)
 
 
-def _flow_compare_sites():
+async def _flow_compare_sites(checkpointer=None):
     """Flow 2: Compare multiple sites."""
     console.print("[bold]Compare Multiple Sites[/]\n")
     num_sites = IntPrompt.ask("  How many sites to compare? (2–5)", default=2)
@@ -331,7 +334,7 @@ def _flow_compare_sites():
         }
 
         try:
-            result = asyncio.run(_run_graph(initial_state))
+            result = await _run_graph(initial_state, checkpointer=checkpointer)
         except Exception as exc:
             console.print(Panel(f"[red]{exc}[/]", title="Error", border_style="red"))
             return
@@ -344,7 +347,7 @@ def _flow_compare_sites():
     _render_comparison(result)
 
 
-def _flow_find_hotspots():
+async def _flow_find_hotspots(checkpointer=None):
     """Flow 3: Find hotspots in a state."""
     console.print("[bold]Find Hotspots[/]\n")
     state_name = Prompt.ask("  Enter state name", default="Gujarat")
@@ -367,10 +370,11 @@ def _flow_find_hotspots():
             "use_case": use_case,
             "site_input": None,
             "user_weights": weights,
+            "state_name": state_name,
         }
 
         try:
-            result = asyncio.run(_run_graph(initial_state))
+            result = await _run_graph(initial_state, checkpointer=checkpointer)
         except Exception as exc:
             console.print(Panel(f"[red]{exc}[/]", title="Error", border_style="red"))
             return
@@ -383,19 +387,69 @@ def _flow_find_hotspots():
     _render_hotspots(result)
 
 
-# ── Main Menu ─────────────────────────────────────────────────────────────
+async def _flow_explain_result(checkpointer=None):
+    """Flow 4: Re-explain a site score in detail."""
+    console.print("[bold]Explain Site Score[/]\n")
+    site_input = _get_site_input()
+    console.print("[bold]Step 2/3 — Use Case[/]")
+    use_case = _select_use_case()
+    weights = _get_weights(use_case)
+    thread_id = str(uuid.uuid4())
 
-@app.command()
-def main():
-    """GeoSpatial Site Readiness Analyzer — Interactive CLI."""
-    _show_banner()
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+    ) as progress:
+        progress.add_task("Generating explanation...", total=None)
+
+        initial_state = {
+            "thread_id": thread_id,
+            "use_case": use_case,
+            "site_input": site_input,
+            "user_weights": weights,
+            "request_explanation": True,
+        }
+
+        try:
+            result = await _run_graph(initial_state, checkpointer=checkpointer)
+        except Exception as exc:
+            console.print(Panel(f"[red]{exc}[/]", title="Error", border_style="red"))
+            return
+
+    error = result.get("error")
+    if error:
+        console.print(Panel(f"[red]{error}[/]", title="Error", border_style="red"))
+        return
+
+    _render_score_result(result)
+
+
+# ── Async Main Loop ──────────────────────────────────────────────────────
+
+async def _create_checkpointer_safe():
+    """Create checkpointer with graceful fallback."""
+    from agents.graph import create_checkpointer
+    return await create_checkpointer()
+
+
+async def _async_main():
+    """Async entry point — single event loop for the entire CLI session."""
+    # Initialize checkpointer once
+    checkpointer = None
+    try:
+        checkpointer = await _create_checkpointer_safe()
+    except Exception as exc:
+        logger.warning("Checkpointer unavailable, running without persistence: %s", exc)
+        checkpointer = None
 
     while True:
         console.print("[bold]Main Menu[/]")
         console.print("  1. Score a site")
         console.print("  2. Compare multiple sites")
         console.print("  3. Find hotspots in a state")
-        console.print("  4. Exit")
+        console.print("  4. Explain a site score in detail")
+        console.print("  5. Exit")
         console.print()
 
         choice = IntPrompt.ask("Enter choice", default=1)
@@ -404,23 +458,29 @@ def main():
 
         if choice == 1:
             try:
-                _flow_score_site()
+                await _flow_score_site(checkpointer=checkpointer)
             except Exception as exc:
                 console.print(Panel(f"[red]{exc}[/]", title="Error", border_style="red"))
 
         elif choice == 2:
             try:
-                _flow_compare_sites()
+                await _flow_compare_sites(checkpointer=checkpointer)
             except Exception as exc:
                 console.print(Panel(f"[red]{exc}[/]", title="Error", border_style="red"))
 
         elif choice == 3:
             try:
-                _flow_find_hotspots()
+                await _flow_find_hotspots(checkpointer=checkpointer)
             except Exception as exc:
                 console.print(Panel(f"[red]{exc}[/]", title="Error", border_style="red"))
 
         elif choice == 4:
+            try:
+                await _flow_explain_result(checkpointer=checkpointer)
+            except Exception as exc:
+                console.print(Panel(f"[red]{exc}[/]", title="Error", border_style="red"))
+
+        elif choice == 5:
             console.print("[bold bright_cyan]Goodbye! 👋[/]")
             raise typer.Exit()
 
@@ -428,6 +488,15 @@ def main():
             console.print("[yellow]Invalid choice. Please try again.[/]")
 
         console.print()
+
+
+# ── Main Menu ─────────────────────────────────────────────────────────────
+
+@app.command()
+def main():
+    """GeoSpatial Site Readiness Analyzer — Interactive CLI."""
+    _show_banner()
+    asyncio.run(_async_main())
 
 
 if __name__ == "__main__":

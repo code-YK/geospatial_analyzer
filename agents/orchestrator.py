@@ -71,7 +71,10 @@ async def orchestrator_node(state: AgentState) -> dict:
         # ── 4. Detect intent ─────────────────────────────────────────
         comparison_sites = state.get("comparison_sites")
 
-        if comparison_sites and len(comparison_sites) >= 2:
+        if state.get("request_explanation") and site_input is not None:
+            updates["intent"] = "explain_result"
+
+        elif comparison_sites and len(comparison_sites) >= 1:
             updates["intent"] = "compare_sites"
 
         elif site_input is None:

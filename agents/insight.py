@@ -59,7 +59,7 @@ async def insight_node(state: AgentState) -> dict:
 def _build_user_prompt(state: AgentState, intent: str) -> str:
     """Build the user prompt based on the current intent and state data."""
 
-    if intent in ("score_site", "advise_weights", "explain_result"):
+    if intent in ("score_site", "advise_weights"):
         features = state.get("site_features")
         breakdown = state.get("score_breakdown")
         final_score = state.get("final_score", 0.0)
@@ -90,6 +90,34 @@ def _build_user_prompt(state: AgentState, intent: str) -> str:
             weaknesses=", ".join(breakdown.weaknesses) if breakdown else "N/A",
         )
 
+    elif intent == "explain_result":
+        features = state.get("site_features")
+        breakdown = state.get("score_breakdown")
+        final_score = state.get("final_score", 0.0)
+        breakdown_text = ""
+        if breakdown:
+            for dim, contrib in breakdown.contributions.items():
+                breakdown_text += (
+                    f"  {dim}: raw={contrib.raw:.0f}, "
+                    f"weight={contrib.weight:.2f}, "
+                    f"contribution={contrib.contribution:.1f} "
+                    f"(rank #{contrib.rank})\n"
+                )
+        return INSIGHT_SCORE_USER_PROMPT.format(
+            use_case=state.get("use_case", ""),
+            state=getattr(features, "state", "N/A") if features else "N/A",
+            district=getattr(features, "district", "N/A") if features else "N/A",
+            area_name=getattr(features, "area_name", "N/A") if features else "N/A",
+            grid_id=getattr(features, "grid_id", "N/A") if features else "N/A",
+            lat=getattr(features, "latitude", 0) if features else 0,
+            lng=getattr(features, "longitude", 0) if features else 0,
+            population_density=getattr(features, "population_density", "N/A") if features else "N/A",
+            score_breakdown=breakdown_text or "N/A",
+            site_readiness_score=final_score,
+            strengths=", ".join(breakdown.strengths) if breakdown else "N/A",
+            weaknesses=", ".join(breakdown.weaknesses) if breakdown else "N/A",
+        )
+
     elif intent == "compare_sites":
         comparison = state.get("comparison_results", [])
         table_lines = []
@@ -114,10 +142,10 @@ def _build_user_prompt(state: AgentState, intent: str) -> str:
                 f"(Grid {hs.grid_id}): score={hs.site_readiness_score:.1f}"
             )
 
-        features = state.get("site_features")
+        state_label = state.get("state_name") or "India"
         return INSIGHT_HOTSPOT_USER_PROMPT.format(
             use_case=state.get("use_case", ""),
-            state=getattr(features, "state", "India") if features else "India",
+            state=state_label,
             top_n=len(hotspots or []),
             hotspot_table="\n".join(table_lines) or "N/A",
         )
@@ -130,7 +158,7 @@ def _build_fallback_insight(state: AgentState, intent: str) -> str:
     final_score = state.get("final_score", 0)
     use_case = state.get("use_case", "general")
 
-    if intent in ("score_site", "advise_weights"):
+    if intent in ("score_site", "advise_weights", "explain_result"):
         return (
             f"Site readiness score: {final_score:.1f}/100 for {use_case}. "
             f"(Detailed LLM insight unavailable — see score breakdown above.)"
