@@ -39,40 +39,55 @@ All intelligence flows through a **LangGraph state graph** — API routes never 
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        Entry Points                                 │
-│                                                                     │
-│   ┌──────────────┐    ┌──────────────┐    ┌──────────────────────┐  │
-│   │  FastAPI      │    │  Rich CLI    │    │  LangGraph Studio    │  │
-│   │  (main.py)    │    │  (cli.py)    │    │  (langgraph.json)    │  │
-│   └──────┬───────┘    └──────┬───────┘    └──────────┬───────────┘  │
-│          │                   │                       │              │
-│          └───────────────────┼───────────────────────┘              │
-│                              ▼                                      │
-│   ┌──────────────────────────────────────────────────────────────┐  │
-│   │                  LangGraph StateGraph                        │  │
-│   │                                                              │  │
-│   │   orchestrator ──► advisory ──► fetch_features ──►           │  │
-│   │        │                        fetch_scores ──►             │  │
-│   │        │                        compute_score ──►            │  │
-│   │        │                        explainability ──►           │  │
-│   │        ├──► geospatial ──►      insight ──► END              │  │
-│   │        └──► error_handler ──► END                            │  │
-│   └──────────────────────────────────────────────────────────────┘  │
-│                              │                                      │
-│          ┌───────────────────┼───────────────────┐                  │
-│          ▼                   ▼                   ▼                  │
-│   ┌────────────┐    ┌──────────────┐    ┌──────────────────┐       │
-│   │  Tools     │    │  Scoring     │    │  LLM (Groq)      │       │
-│   │  Layer     │    │  Engine      │    │  via llm_config   │       │
-│   └─────┬──────┘    └──────────────┘    └──────────────────┘       │
-│         ▼                                                           │
-│   ┌──────────────────────────────┐                                  │
-│   │  PostgreSQL + PostGIS        │                                  │
-│   │  (site_features table)       │                                  │
-│   └──────────────────────────────┘                                  │
-└─────────────────────────────────────────────────────────────────────┘
+```mermaid
+graph TB
+    subgraph Entry Points
+        A["FastAPI<br/>(main.py)"]
+        B["Rich CLI<br/>(cli.py)"]
+        C["LangGraph Studio<br/>(langgraph.json)"]
+    end
+
+    subgraph LangGraph StateGraph
+        D["orchestrator"]
+        E["advisory"]
+        F["fetch_features"]
+        G["fetch_scores"]
+        H["compute_score"]
+        I["geospatial"]
+        J["explainability"]
+        K["insight"]
+        L["error_handler"]
+    end
+
+    subgraph Backend
+        M["Tools Layer"]
+        N["Scoring Engine"]
+        O["LLM - Groq"]
+        P[("PostgreSQL + PostGIS")]
+    end
+
+    A --> D
+    B --> D
+    C --> D
+    D --> E
+    D --> F
+    D --> I
+    D --> L
+    E --> F
+    F --> G
+    G --> H
+    H --> J
+    I --> K
+    J --> K
+    L --> END["__end__"]
+    K --> END
+
+    F -.-> M
+    G -.-> M
+    H -.-> N
+    E -.-> O
+    K -.-> O
+    M -.-> P
 ```
 
 ### Key Principles
@@ -90,6 +105,42 @@ All intelligence flows through a **LangGraph state graph** — API routes never 
 ## Agent Graph
 
 The system uses a **LangGraph StateGraph** with 9 nodes and conditional routing.
+
+```mermaid
+flowchart TD
+    START(["__start__"]) --> orchestrator
+
+    orchestrator --> advisory
+    orchestrator --> fetch_features
+    orchestrator --> geospatial
+    orchestrator --> error_handler
+
+    advisory --> fetch_features
+
+    fetch_features --> fetch_scores
+    fetch_scores --> compute_score
+
+    compute_score --> explainability
+    compute_score --> geospatial
+
+    geospatial --> insight
+    explainability --> insight
+
+    insight --> END(["__end__"])
+    error_handler --> END
+
+    style START fill:#1a1a2e,stroke:#e94560,color:#fff
+    style END fill:#1a1a2e,stroke:#e94560,color:#fff
+    style orchestrator fill:#16213e,stroke:#0f3460,color:#e0e0e0
+    style advisory fill:#2d2d0f,stroke:#b8860b,color:#ffd700
+    style fetch_features fill:#0d3320,stroke:#2e8b57,color:#90ee90
+    style fetch_scores fill:#0d3320,stroke:#2e8b57,color:#90ee90
+    style compute_score fill:#0d3320,stroke:#2e8b57,color:#90ee90
+    style geospatial fill:#1a1a3e,stroke:#6a5acd,color:#b8b8ff
+    style explainability fill:#2d1a1a,stroke:#cd5c5c,color:#ffb6b6
+    style insight fill:#1a1a3e,stroke:#6a5acd,color:#b8b8ff
+    style error_handler fill:#2d1a1a,stroke:#8b0000,color:#ff6b6b
+```
 
 ### Nodes
 
@@ -109,15 +160,14 @@ The system uses a **LangGraph StateGraph** with 9 nodes and conditional routing.
 
 The orchestrator detects intent **deterministically** (no LLM) based on the request shape:
 
-```
-START
-  └─► orchestrator
-        ├─► [advise_weights]   → advisory → fetch_features → fetch_scores → compute_score → explainability → insight → END
-        ├─► [score_site]       → fetch_features → fetch_scores → compute_score → explainability → insight → END
-        ├─► [compare_sites]    → fetch_features → fetch_scores → compute_score → explainability → insight → END
-        ├─► [find_hotspots]    → geospatial → insight → END
-        ├─► [explain_result]   → fetch_features → fetch_scores → explainability → insight → END
-        └─► [error]            → error_handler → END
+```mermaid
+flowchart LR
+    O["orchestrator"] --> |advise_weights| A["advisory → fetch_features → fetch_scores → compute_score → explainability → insight"]
+    O --> |score_site| B["fetch_features → fetch_scores → compute_score → explainability → insight"]
+    O --> |compare_sites| C["fetch_features → fetch_scores → compute_score → explainability → insight"]
+    O --> |find_hotspots| D["geospatial → insight"]
+    O --> |explain_result| E["fetch_features → fetch_scores → explainability → insight"]
+    O --> |error| F["error_handler"]
 ```
 
 ### State Schema
@@ -331,14 +381,25 @@ geo_site_v2/
 ├── cli.py                        # Menu-based CLI (Typer + Rich)
 ├── pyproject.toml                # Dependencies & project config
 ├── requirements.txt              # pip-compatible dependency list
+├── alembic.ini                   # Alembic migration config
 ├── langgraph.json                # LangGraph Studio configuration
 ├── .env.example                  # Environment variable template
 ├── SETUP.md                      # Database setup & install guide
 ├── README.md                     # This file
 │
+├── migrations/                   # Alembic database migrations
+│   ├── env.py                    # Migration environment (reads .env)
+│   ├── script.py.mako            # Migration file template
+│   └── versions/
+│       └── 001_initial_schema.py # First migration: site_features table
+│
+├── logs/                         # Application logs (gitignored)
+│   └── agent_app.log             # Rotating log file (5MB × 3 backups)
+│
 ├── core/                         # Configuration & infrastructure
 │   ├── config.py                 # pydantic-settings (.env loader)
 │   ├── database.py               # Async SQLAlchemy engine + session factory
+│   ├── logger.py                 # Centralized logging (setup_logging + get_logger)
 │   └── exceptions.py             # 7 custom exception classes
 │
 ├── llm/                          # LLM abstraction layer
