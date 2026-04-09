@@ -1,7 +1,10 @@
 .env
-.venv/
+.venv/ 
 logs/
 *.pyc
 __pycache__/
 .vscode/
+.langgraph_api/
+.idea/
+
 
