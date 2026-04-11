@@ -3,6 +3,9 @@ agents/graph.py — LangGraph StateGraph definition.
 
 Wires all agent nodes together with conditional edges based on intent.
 Uses Postgres-backed checkpointer for state persistence.
+
+v2: Chat node as START, validation node before scoring,
+    chat_response node after insight.
 """
 
 
@@ -12,6 +15,7 @@ from langgraph.graph import END, StateGraph
 
 from agents.state import AgentState
 from agents.advisory import advisory_node
+from agents.chat import chat_node, chat_response_node
 from agents.geospatial import geospatial_node
 from agents.insight import insight_node
 from agents.orchestrator import orchestrator_node
@@ -26,6 +30,7 @@ from tools.site_tools import (
     fetch_precomputed_scores,
     fetch_site_features,
 )
+from tools.validation_tools import run_all_validations
 
 logger = get_logger(__name__)
 
@@ -77,6 +82,65 @@ async def fetch_scores_node(state: AgentState) -> dict:
     except Exception as exc:
         logger.error("fetch_scores_node error: %s", exc)
         updates["error"] = f"Failed to fetch precomputed scores: {exc}"
+
+    return updates
+
+
+async def validation_node(state: AgentState) -> dict:
+    """
+    Runs AFTER fetch_scores, BEFORE compute_score.
+
+    - Calls run_all_validations()
+    - If any result is "block": set state["error"], route to error_handler
+    - If warns: apply score penalties to precomputed_scores,
+                collect messages into state["validation_warnings"]
+    """
+    updates: dict = {"current_node": "validation"}
+
+    use_case = state.get("use_case", "retail")
+    state_name = state.get("state_name", "")
+    site_features = state.get("site_features")
+    precomputed = state.get("precomputed_scores")
+
+    if site_features is None:
+        # Nothing to validate — let downstream nodes handle
+        return updates
+
+    # Infer state_name from features if not provided
+    if not state_name and hasattr(site_features, "state"):
+        state_name = getattr(site_features, "state", "")
+        updates["state_name"] = state_name
+
+    results = run_all_validations(use_case, state_name, site_features)
+
+    blocks = [r for r in results if r.status == "block"]
+    warns = [r for r in results if r.status == "warn"]
+
+    if blocks:
+        block = blocks[0]
+        updates["error"] = (
+            f"⛔ This location is not suitable for "
+            f"**{use_case.replace('_', ' ')}**.\n\n"
+            f"**Reason:** {block.reason}\n"
+            f"**Regulation:** {block.regulation_ref or 'N/A'}"
+        )
+        return updates
+
+    if warns and precomputed is not None:
+        # Apply penalties to a copy of precomputed scores
+        score_dict = precomputed.model_dump()
+        for w in warns:
+            if w.penalty_dimension and w.penalty_points > 0:
+                dim = w.penalty_dimension
+                if dim in score_dict:
+                    score_dict[dim] = max(0.0, score_dict[dim] - w.penalty_points)
+                    logger.info(
+                        "Validation penalty: %s −%.0f on %s",
+                        w.reason[:60], w.penalty_points, dim,
+                    )
+
+        updates["precomputed_scores"] = PrecomputedScores(**score_dict)
+        updates["validation_warnings"] = [w.reason for w in warns]
 
     return updates
 
@@ -188,10 +252,30 @@ async def error_handler_node(state: AgentState) -> dict:
     return {
         "current_node": "error_handler",
         "insight_text": f"⚠ Error: {error}",
+        "chat_response": f"⚠ {error}",
     }
 
 
 # ── Routing Functions ────────────────────────────────────────────────────
+
+def route_after_chat(state: AgentState) -> str:
+    """Route after chat_node based on chat_intent."""
+    intent = state.get("chat_intent", "")
+    error = state.get("error")
+
+    if error:
+        return "error_handler"
+
+    routing = {
+        "needs_graph":    "orchestrator",
+        "direct_answer":  "__end__",
+        "follow_up":      "__end__",
+        "ask_field":      "__end__",
+        "off_topic":      "__end__",
+    }
+
+    return routing.get(intent, "__end__")
+
 
 def route_after_orchestrator(state: AgentState) -> str:
     """Conditional routing based on detected intent."""
@@ -217,6 +301,10 @@ def route_after_fetch_features(state: AgentState) -> str:
 
 
 def route_after_fetch_scores(state: AgentState) -> str:
+    return "error_handler" if state.get("error") else "validation"
+
+
+def route_after_validation(state: AgentState) -> str:
     return "error_handler" if state.get("error") else "compute_score"
 
 
@@ -234,30 +322,48 @@ def build_graph() -> StateGraph:
     """
     Build and compile the LangGraph StateGraph.
 
-    Node layout:
-        START → orchestrator → [conditional routing]
-            ├─ advise_weights  → advisory → fetch_features →[err?]→ fetch_scores →[err?]→ compute_score →[err?]→ explainability →[err?]→ insight → END
-            ├─ score_site      → fetch_features →[err?]→ fetch_scores →[err?]→ compute_score →[err?]→ explainability →[err?]→ insight → END
-            ├─ compare_sites   → fetch_features →[err?]→ fetch_scores →[err?]→ compute_score →[err?]→ explainability →[err?]→ insight → END
-            ├─ explain_result  → fetch_features →[err?]→ fetch_scores →[err?]→ explainability →[err?]→ insight → END
-            ├─ find_hotspots   → geospatial → insight → END
-            └─ error from any node → error_handler → END
+    Node layout (v2 — chat-first with validation):
+
+        START → chat_node → [conditional on chat_intent]
+            ├── needs_graph → orchestrator → [conditional on intent]
+            │       ├── advise_weights → advisory → fetch_features → fetch_scores → validation → compute_score → explainability → insight → chat_response → END
+            │       ├── score_site     → fetch_features → ... → chat_response → END
+            │       ├── compare_sites  → fetch_features → ... → chat_response → END
+            │       ├── explain_result → fetch_features → ... → chat_response → END
+            │       ├── find_hotspots  → geospatial → insight → chat_response → END
+            │       └── error          → error_handler → END
+            ├── direct_answer / follow_up / ask_field → END (chat_response set)
+            └── off_topic (retry exceeded) → error_handler → END
     """
     graph = StateGraph(AgentState)
 
     # ── Add nodes ────────────────────────────────────────────────────
+    graph.add_node("chat", chat_node)
     graph.add_node("orchestrator", orchestrator_node)
     graph.add_node("advisory", advisory_node)
     graph.add_node("fetch_features", fetch_features_node)
     graph.add_node("fetch_scores", fetch_scores_node)
+    graph.add_node("validation", validation_node)
     graph.add_node("compute_score", compute_score_node)
     graph.add_node("geospatial", geospatial_node)
     graph.add_node("explainability", explainability_node)
     graph.add_node("insight", insight_node)
+    graph.add_node("chat_response", chat_response_node)
     graph.add_node("error_handler", error_handler_node)
 
     # ── Entry point ──────────────────────────────────────────────────
-    graph.set_entry_point("orchestrator")
+    graph.set_entry_point("chat")
+
+    # ── Conditional edges from chat_node ─────────────────────────────
+    graph.add_conditional_edges(
+        "chat",
+        route_after_chat,
+        {
+            "orchestrator": "orchestrator",
+            "error_handler": "error_handler",
+            "__end__": END,
+        },
+    )
 
     # ── Conditional edges from orchestrator ──────────────────────────
     graph.add_conditional_edges(
@@ -274,13 +380,16 @@ def build_graph() -> StateGraph:
     # ── Linear edges (no error possible) ─────────────────────────────
     graph.add_edge("advisory", "fetch_features")
     graph.add_edge("geospatial", "insight")
-    graph.add_edge("insight", END)
+    graph.add_edge("insight", "chat_response")
+    graph.add_edge("chat_response", END)
     graph.add_edge("error_handler", END)
 
     # ── Conditional edges (error → error_handler) ────────────────────
     graph.add_conditional_edges("fetch_features", route_after_fetch_features,
         {"fetch_scores": "fetch_scores", "error_handler": "error_handler"})
     graph.add_conditional_edges("fetch_scores", route_after_fetch_scores,
+        {"validation": "validation", "error_handler": "error_handler"})
+    graph.add_conditional_edges("validation", route_after_validation,
         {"compute_score": "compute_score", "error_handler": "error_handler"})
     graph.add_conditional_edges("compute_score", route_after_compute_score,
         {"explainability": "explainability", "error_handler": "error_handler"})

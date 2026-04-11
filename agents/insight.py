@@ -16,6 +16,7 @@ from llm.prompts import (
     INSIGHT_HOTSPOT_USER_PROMPT,
     INSIGHT_SCORE_USER_PROMPT,
     INSIGHT_SYSTEM_PROMPT,
+    VALIDATION_INSIGHT_ADDENDUM,
 )
 
 logger = get_logger(__name__)
@@ -35,6 +36,13 @@ async def insight_node(state: AgentState) -> dict:
         llm = get_llm()
 
         user_prompt = _build_user_prompt(state, intent)
+
+        # Append validation warnings if present
+        validation_warnings = state.get("validation_warnings", [])
+        if validation_warnings:
+            warnings_text = "\n".join(f"- {w}" for w in validation_warnings)
+            user_prompt += VALIDATION_INSIGHT_ADDENDUM.format(warnings=warnings_text)
+
         logger.info("Insight LLM call started for intent=%s", intent)
 
         messages = [
