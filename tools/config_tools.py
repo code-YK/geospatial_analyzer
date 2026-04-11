@@ -5,7 +5,7 @@ tools/config_tools.py — Weight validation and default config helpers.
 from typing import Optional, Tuple
 
 from models.weights import WeightConfig
-from scoring.weights import USE_CASE_WEIGHTS
+from scoring.weights import USE_CASE_CATALOG
 
 REQUIRED_KEYS = [
     "demand_score",
@@ -26,12 +26,12 @@ def get_default_weights(use_case: str) -> WeightConfig:
     ValueError
         If the use case is not recognised.
     """
-    if use_case not in USE_CASE_WEIGHTS:
+    if use_case not in USE_CASE_CATALOG:
         raise ValueError(
             f"Unknown use case '{use_case}'. "
-            f"Valid options: {list(USE_CASE_WEIGHTS.keys())}"
+            f"Valid options: {sorted(USE_CASE_CATALOG.keys())}"
         )
-    return USE_CASE_WEIGHTS[use_case]
+    return USE_CASE_CATALOG[use_case].weights
 
 
 def validate_weights(weights: dict) -> Tuple[bool, Optional[str]]:

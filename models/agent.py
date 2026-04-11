@@ -36,3 +36,5 @@ class AgentOutput(BaseModel):
     advisory_text: Optional[str] = None
     recommended_weights: Optional[WeightConfig] = None
     error: Optional[str] = None
+    chat_response: Optional[str] = None
+    validation_warnings: Optional[List[str]] = None

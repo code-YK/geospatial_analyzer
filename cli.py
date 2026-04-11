@@ -1,27 +1,22 @@
 """
-cli.py — Menu-based CLI using Typer + Rich.
+cli.py — Conversational CLI using Rich.
 
-Stateless per run: each execution generates a new thread_id (UUID4).
+All logic is in the chat_node — the CLI is just a simple REPL.
 """
 
 import asyncio
 import uuid
-from typing import Optional
 
 import typer
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
-from rich.prompt import Confirm, FloatPrompt, IntPrompt, Prompt
+from rich.prompt import Prompt
 from rich.table import Table
 
 from agents.graph import get_compiled_graph
 from core.config import get_settings
 from core.logger import setup_logging, get_logger
-from models.site import SiteInput
-from models.weights import WeightConfig
-from scoring.weights import USE_CASE_WEIGHTS, VALID_USE_CASES
-from tools.config_tools import get_default_weights
 
 # Initialize logging early
 settings = get_settings()
@@ -30,18 +25,10 @@ logger = get_logger(__name__)
 
 app = typer.Typer(
     name="geo-cli",
-    help="GeoSpatial Site Readiness Analyzer — CLI Interface",
+    help="GeoSpatial Site Readiness Analyzer — Conversational CLI",
     add_completion=False,
 )
 console = Console()
-
-USE_CASE_LABELS = {
-    "retail": "Retail store",
-    "ev_charging": "EV charging station",
-    "warehouse": "Warehouse / logistics",
-    "telecom": "Telecom tower",
-    "renewable": "Renewable energy",
-}
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────
@@ -50,7 +37,9 @@ def _show_banner():
     """Display the application banner."""
     console.print(
         Panel.fit(
-            "[bold bright_cyan]GeoSpatial Site Readiness Analyzer[/]",
+            "[bold bright_cyan]GeoSpatial Site Readiness Analyzer[/]\n"
+            "[dim]Ask me anything — 'Score a retail site at 23.02, 72.57' "
+            "or 'Find EV hotspots in Gujarat'[/]",
             border_style="bright_cyan",
             padding=(1, 4),
         )
@@ -58,75 +47,11 @@ def _show_banner():
     console.print()
 
 
-def _select_use_case() -> str:
-    """Prompt user to select a business use case."""
-    console.print("[bold]Select use case:[/]")
-    for i, (key, label) in enumerate(USE_CASE_LABELS.items(), 1):
-        console.print(f"  {i}. {label}")
-    console.print()
-
-    choice = IntPrompt.ask("Enter choice", default=1)
-    keys = list(USE_CASE_LABELS.keys())
-    idx = max(0, min(choice - 1, len(keys) - 1))
-    selected = keys[idx]
-    console.print(f"  ✓ Selected: [bold green]{USE_CASE_LABELS[selected]}[/]\n")
-    return selected
-
-
-def _get_site_input() -> SiteInput:
-    """Prompt user for site location."""
-    console.print("[bold]Step 1/3 — Site Location[/]")
-    lat = FloatPrompt.ask("  Enter latitude", default=23.0225)
-    lng = FloatPrompt.ask("  Enter longitude", default=72.5714)
-    console.print()
-    return SiteInput(lat=lat, lng=lng)
-
-
-def _get_weights(use_case: str) -> Optional[WeightConfig]:
-    """Prompt user for scoring weights or use defaults."""
-    console.print("[bold]Step 3/3 — Scoring Weights[/]")
-    defaults = get_default_weights(use_case)
-    use_defaults = Confirm.ask(
-        f"  Use default weights for {USE_CASE_LABELS.get(use_case, use_case)}?",
-        default=True,
-    )
-
-    if use_defaults:
-        console.print("  ✓ Using default weights\n")
-        return defaults
-
-    console.print("\n  Enter weights (must sum to 1.0):")
-    demand = FloatPrompt.ask(f"    Demand score weight       [default: {defaults.demand_score}]", default=defaults.demand_score)
-    accessibility = FloatPrompt.ask(f"    Accessibility score weight [default: {defaults.accessibility_score}]", default=defaults.accessibility_score)
-    competition = FloatPrompt.ask(f"    Competition score weight  [default: {defaults.competition_score}]", default=defaults.competition_score)
-    suitability = FloatPrompt.ask(f"    Suitability score weight  [default: {defaults.suitability_score}]", default=defaults.suitability_score)
-    risk = FloatPrompt.ask(f"    Risk score weight         [default: {defaults.risk_score}]", default=defaults.risk_score)
-    infrastructure = FloatPrompt.ask(f"    Infrastructure score weight [default: {defaults.infrastructure_score}]", default=defaults.infrastructure_score)
-
-    total = demand + accessibility + competition + suitability + risk + infrastructure
-    console.print(f"\n  Weights sum: [bold]{total:.2f}[/]")
-
-    if not (0.99 <= total <= 1.01):
-        console.print("[red]  ✗ Weights do not sum to 1.0. Using defaults instead.[/]\n")
-        return defaults
-
-    console.print("[green]  ✓ Weights valid[/]\n")
-    return WeightConfig(
-        demand_score=demand,
-        accessibility_score=accessibility,
-        competition_score=competition,
-        suitability_score=suitability,
-        risk_score=risk,
-        infrastructure_score=infrastructure,
-    )
-
-
-def _render_score_result(result: dict):
+def _render_score_result(state: dict):
     """Render a single-site scoring result."""
-    final_score = result.get("final_score", 0)
-    breakdown = result.get("score_breakdown")
-    insight = result.get("insight_text", "")
-    advisory = result.get("advisory_text")
+    final_score = state.get("final_score", 0)
+    breakdown = state.get("score_breakdown")
+    advisory = state.get("advisory_text")
 
     # Score panel
     bar_filled = int(final_score / 100 * 20)
@@ -168,23 +93,25 @@ def _render_score_result(result: dict):
         console.print(f"  [bold red]Weaknesses:[/] {', '.join(breakdown.weaknesses)}")
         console.print()
 
+    # Validation warnings
+    warnings = state.get("validation_warnings", [])
+    if warnings:
+        console.print("[bold yellow]⚠ Regulatory Warnings:[/]")
+        for w in warnings:
+            console.print(f"  [yellow]• {w}[/]")
+        console.print()
+
     # Advisory text
     if advisory:
         console.print(
             Panel(advisory, title="Advisory", border_style="bright_blue", padding=(0, 1))
         )
 
-    # Insight text
-    if insight:
-        console.print(
-            Panel(insight, title="Insight", border_style="bright_magenta", padding=(0, 1))
-        )
 
-
-def _render_comparison(result: dict):
+def _render_comparison(state: dict):
     """Render a multi-site comparison table."""
-    ranked = result.get("comparison_results", [])
-    insight = result.get("insight_text", "")
+    ranked = state.get("comparison_results", [])
+    insight = state.get("insight_text", "")
 
     table = Table(title="Site Comparison (Ranked)", show_header=True, header_style="bold cyan")
     table.add_column("Rank", justify="center", width=5)
@@ -207,16 +134,10 @@ def _render_comparison(result: dict):
     console.print(table)
     console.print()
 
-    if insight:
-        console.print(
-            Panel(insight, title="Insight", border_style="bright_magenta", padding=(0, 1))
-        )
 
-
-def _render_hotspots(result: dict):
+def _render_hotspots(state: dict):
     """Render hotspot detection results."""
-    hotspots = result.get("hotspot_results", [])
-    insight = result.get("insight_text", "")
+    hotspots = state.get("hotspot_results", [])
 
     table = Table(title="Top Hotspot Locations", show_header=True, header_style="bold cyan")
     table.add_column("Rank", justify="center", width=5)
@@ -239,189 +160,17 @@ def _render_hotspots(result: dict):
     console.print(table)
     console.print()
 
-    if insight:
-        console.print(
-            Panel(insight, title="Insight", border_style="bright_magenta", padding=(0, 1))
-        )
-
 
 # ── Graph Runner ──────────────────────────────────────────────────────────
 
-async def _run_graph(initial_state: dict, checkpointer=None) -> dict:
+async def _run_graph(state: dict, checkpointer=None) -> dict:
     """Run the LangGraph graph and return the final state."""
     compiled = get_compiled_graph(checkpointer=checkpointer)
-    config = {"configurable": {"thread_id": initial_state.get("thread_id", "cli")}}
-    return await compiled.ainvoke(initial_state, config=config)
+    config = {"configurable": {"thread_id": state.get("thread_id", "cli")}}
+    return await compiled.ainvoke(state, config=config)
 
 
-# ── CLI Flows (async) ────────────────────────────────────────────────────
-
-async def _flow_score_site(checkpointer=None):
-    """Flow 1: Score a single site."""
-    site_input = _get_site_input()
-
-    console.print("[bold]Step 2/3 — Use Case[/]")
-    use_case = _select_use_case()
-
-    weights = _get_weights(use_case)
-
-    thread_id = str(uuid.uuid4())
-
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console,
-    ) as progress:
-        progress.add_task("Running analysis...", total=None)
-
-        initial_state = {
-            "thread_id": thread_id,
-            "use_case": use_case,
-            "site_input": site_input,
-            "user_weights": weights,
-        }
-
-        try:
-            result = await _run_graph(initial_state, checkpointer=checkpointer)
-        except Exception as exc:
-            console.print(Panel(f"[red]{exc}[/]", title="Error", border_style="red"))
-            return
-
-    error = result.get("error")
-    if error:
-        console.print(Panel(f"[red]{error}[/]", title="Error", border_style="red"))
-        return
-
-    _render_score_result(result)
-
-
-async def _flow_compare_sites(checkpointer=None):
-    """Flow 2: Compare multiple sites."""
-    console.print("[bold]Compare Multiple Sites[/]\n")
-    num_sites = IntPrompt.ask("  How many sites to compare? (2–5)", default=2)
-    num_sites = max(2, min(5, num_sites))
-
-    sites = []
-    for i in range(num_sites):
-        console.print(f"\n  [bold]Site {i + 1}:[/]")
-        lat = FloatPrompt.ask("    Latitude", default=23.0225)
-        lng = FloatPrompt.ask("    Longitude", default=72.5714)
-        sites.append(SiteInput(lat=lat, lng=lng))
-
-    console.print()
-    use_case = _select_use_case()
-    weights = _get_weights(use_case)
-
-    thread_id = str(uuid.uuid4())
-
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console,
-    ) as progress:
-        progress.add_task("Comparing sites...", total=None)
-
-        initial_state = {
-            "thread_id": thread_id,
-            "use_case": use_case,
-            "site_input": sites[0],
-            "user_weights": weights,
-            "comparison_sites": sites[1:],
-        }
-
-        try:
-            result = await _run_graph(initial_state, checkpointer=checkpointer)
-        except Exception as exc:
-            console.print(Panel(f"[red]{exc}[/]", title="Error", border_style="red"))
-            return
-
-    error = result.get("error")
-    if error:
-        console.print(Panel(f"[red]{error}[/]", title="Error", border_style="red"))
-        return
-
-    _render_comparison(result)
-
-
-async def _flow_find_hotspots(checkpointer=None):
-    """Flow 3: Find hotspots in a state."""
-    console.print("[bold]Find Hotspots[/]\n")
-    state_name = Prompt.ask("  Enter state name", default="Gujarat")
-
-    use_case = _select_use_case()
-    weights = _get_weights(use_case)
-
-    thread_id = str(uuid.uuid4())
-
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console,
-    ) as progress:
-        progress.add_task("Detecting hotspots...", total=None)
-
-        # For hotspots we pass a dummy site_input
-        initial_state = {
-            "thread_id": thread_id,
-            "use_case": use_case,
-            "site_input": None,
-            "user_weights": weights,
-            "state_name": state_name,
-        }
-
-        try:
-            result = await _run_graph(initial_state, checkpointer=checkpointer)
-        except Exception as exc:
-            console.print(Panel(f"[red]{exc}[/]", title="Error", border_style="red"))
-            return
-
-    error = result.get("error")
-    if error:
-        console.print(Panel(f"[red]{error}[/]", title="Error", border_style="red"))
-        return
-
-    _render_hotspots(result)
-
-
-async def _flow_explain_result(checkpointer=None):
-    """Flow 4: Re-explain a site score in detail."""
-    console.print("[bold]Explain Site Score[/]\n")
-    site_input = _get_site_input()
-    console.print("[bold]Step 2/3 — Use Case[/]")
-    use_case = _select_use_case()
-    weights = _get_weights(use_case)
-    thread_id = str(uuid.uuid4())
-
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console,
-    ) as progress:
-        progress.add_task("Generating explanation...", total=None)
-
-        initial_state = {
-            "thread_id": thread_id,
-            "use_case": use_case,
-            "site_input": site_input,
-            "user_weights": weights,
-            "request_explanation": True,
-        }
-
-        try:
-            result = await _run_graph(initial_state, checkpointer=checkpointer)
-        except Exception as exc:
-            console.print(Panel(f"[red]{exc}[/]", title="Error", border_style="red"))
-            return
-
-    error = result.get("error")
-    if error:
-        console.print(Panel(f"[red]{error}[/]", title="Error", border_style="red"))
-        return
-
-    _render_score_result(result)
-
-
-# ── Async Main Loop ──────────────────────────────────────────────────────
+# ── Chat Loop ─────────────────────────────────────────────────────────────
 
 async def _create_checkpointer_safe():
     """Create checkpointer with graceful fallback."""
@@ -430,7 +179,7 @@ async def _create_checkpointer_safe():
 
 
 async def _async_main():
-    """Async entry point — single event loop for the entire CLI session."""
+    """Async entry point — conversational chat REPL."""
     # Initialize checkpointer once
     checkpointer = None
     try:
@@ -439,58 +188,86 @@ async def _async_main():
         logger.warning("Checkpointer unavailable, running without persistence: %s", exc)
         checkpointer = None
 
+    thread_id = str(uuid.uuid4())
+
+    # Persistent state across the conversation
+    state = {
+        "conversation_history": [],
+        "retry_count": 0,
+        "analysis_complete": False,
+        "thread_id": thread_id,
+    }
+
     while True:
-        console.print("[bold]Main Menu[/]")
-        console.print("  1. Score a site")
-        console.print("  2. Compare multiple sites")
-        console.print("  3. Find hotspots in a state")
-        console.print("  4. Explain a site score in detail")
-        console.print("  5. Exit")
-        console.print()
+        try:
+            user_input = Prompt.ask("\n[bold cyan]You[/]")
+        except (KeyboardInterrupt, EOFError):
+            console.print("\n[dim]Goodbye! 👋[/]")
+            break
 
-        choice = IntPrompt.ask("Enter choice", default=1)
-
-        console.print()
-
-        if choice == 1:
-            try:
-                await _flow_score_site(checkpointer=checkpointer)
-            except Exception as exc:
-                console.print(Panel(f"[red]{exc}[/]", title="Error", border_style="red"))
-
-        elif choice == 2:
-            try:
-                await _flow_compare_sites(checkpointer=checkpointer)
-            except Exception as exc:
-                console.print(Panel(f"[red]{exc}[/]", title="Error", border_style="red"))
-
-        elif choice == 3:
-            try:
-                await _flow_find_hotspots(checkpointer=checkpointer)
-            except Exception as exc:
-                console.print(Panel(f"[red]{exc}[/]", title="Error", border_style="red"))
-
-        elif choice == 4:
-            try:
-                await _flow_explain_result(checkpointer=checkpointer)
-            except Exception as exc:
-                console.print(Panel(f"[red]{exc}[/]", title="Error", border_style="red"))
-
-        elif choice == 5:
+        if user_input.strip().lower() in ("exit", "quit", "bye"):
             console.print("[bold bright_cyan]Goodbye! 👋[/]")
-            raise typer.Exit()
+            break
 
-        else:
-            console.print("[yellow]Invalid choice. Please try again.[/]")
+        if not user_input.strip():
+            continue
 
-        console.print()
+        state["raw_user_message"] = user_input
+
+        try:
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=console,
+                transient=True,
+            ) as progress:
+                progress.add_task("Thinking...", total=None)
+                result = await _run_graph(state, checkpointer=checkpointer)
+        except Exception as exc:
+            console.print(Panel(f"[red]{exc}[/]", title="Error", border_style="red"))
+            continue
+
+        # Update persistent state for next turn
+        state["conversation_history"] = result.get("conversation_history", [])
+        state["retry_count"] = result.get("retry_count", 0)
+        state["analysis_complete"] = result.get("analysis_complete", False)
+
+        # Carry forward analysis data for follow-up questions
+        for key in ("site_features", "precomputed_scores", "final_score",
+                     "score_breakdown", "site_input", "use_case", "state_name",
+                     "comparison_results", "hotspot_results", "user_weights",
+                     "validation_warnings"):
+            if key in result:
+                state[key] = result[key]
+
+        # Display response
+        response = (
+            result.get("chat_response")
+            or result.get("insight_text")
+            or result.get("error")
+            or "I didn't generate a response. Please try again."
+        )
+        console.print(f"\n[bold magenta]Analyzer[/]  {response}")
+
+        # If analysis complete with score, show rich output
+        if result.get("final_score") and result.get("score_breakdown"):
+            _render_score_result(result)
+        elif result.get("comparison_results"):
+            _render_comparison(result)
+        elif result.get("hotspot_results"):
+            _render_hotspots(result)
+
+        # Check session end
+        error = result.get("error", "")
+        if error and "Session ended" in error:
+            break
 
 
-# ── Main Menu ─────────────────────────────────────────────────────────────
+# ── Main Entry Point ─────────────────────────────────────────────────────
 
 @app.command()
 def main():
-    """GeoSpatial Site Readiness Analyzer — Interactive CLI."""
+    """GeoSpatial Site Readiness Analyzer — Conversational CLI."""
     _show_banner()
     asyncio.run(_async_main())
 
