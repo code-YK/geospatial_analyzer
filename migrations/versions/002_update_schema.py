@@ -17,7 +17,9 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    # Rename grid_id to id (if column was named grid_id in migration 001)
+    # Migration 001 has both `id TEXT` and `grid_id TEXT PRIMARY KEY`.
+    # Drop the old non-PK `id` column first, then rename `grid_id` → `id`.
+    op.execute("ALTER TABLE site_features DROP COLUMN IF EXISTS id;")
     op.execute("ALTER TABLE site_features RENAME COLUMN grid_id TO id;")
 
     # Drop removed columns
