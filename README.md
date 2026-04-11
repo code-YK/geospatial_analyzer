@@ -1,6 +1,6 @@
 # 🌍 GeoSpatial Site Readiness Analyzer
 
-An AI-powered location intelligence platform that evaluates and scores geographic sites for business use cases using precomputed geospatial features, a deterministic scoring engine, and LangGraph multi-agent orchestration.
+An AI-powered location intelligence platform that evaluates and scores geographic sites for business use cases using precomputed geospatial features, a deterministic scoring engine, and LangGraph multi-agent orchestration with conversational chat.
 
 ---
 
@@ -9,7 +9,10 @@ An AI-powered location intelligence platform that evaluates and scores geographi
 - [Overview](#overview)
 - [Architecture](#architecture)
 - [Agent Graph](#agent-graph)
+- [Chat Interface](#chat-interface)
+- [Validation Framework](#validation-framework)
 - [Scoring Engine](#scoring-engine)
+- [Use Case Catalog](#use-case-catalog)
 - [Data Layer](#data-layer)
 - [API Reference](#api-reference)
 - [CLI Interface](#cli-interface)
@@ -25,15 +28,21 @@ An AI-powered location intelligence platform that evaluates and scores geographi
 
 The system answers a simple question: **"How suitable is this location for my business?"**
 
-Given a latitude/longitude and a business use case (retail, EV charging, warehouse, telecom, renewable energy), it:
+Given a natural language query (e.g. *"Score a retail site at 23.02, 72.57"*), it:
 
-1. Finds the **nearest site** using PostGIS spatial indexing (`<->` operator)
-2. Fetches **68 precomputed geospatial features** from PostgreSQL
-3. Applies a **weighted scoring formula** across 6 dimensions
-4. Generates an **explainable score breakdown** (strengths, weaknesses, contributions)
-5. Produces a **natural language insight** via LLM
+1. **Parses intent** via the chat node — extracts lat/lng, use case, and weights from free text
+2. **Validates** the site against legal, proximity, environmental, and viability rules
+3. Finds the **nearest site** using PostGIS spatial indexing (`<->` operator)
+4. Fetches **68 precomputed geospatial features** from PostgreSQL
+5. Applies a **weighted scoring formula** across 6 dimensions
+6. Generates an **explainable score breakdown** (strengths, weaknesses, contributions)
+7. Produces a **natural language insight** via LLM
 
 All intelligence flows through a **LangGraph state graph** — API routes never call tools directly.
+
+### Supported Use Cases
+
+**95 business types** across 15 categories: Necessity & Civic, Healthcare, Education, Food & Beverage, Retail, Energy & Fuel, Finance, Fun & Leisure, Hospitality, Industrial, Chemical, Logistics, Professional Services, Religious & Civic, and Agriculture.
 
 ---
 
@@ -43,32 +52,38 @@ All intelligence flows through a **LangGraph state graph** — API routes never 
 graph TB
     subgraph Entry Points
         A["FastAPI<br/>(main.py)"]
-        B["Rich CLI<br/>(cli.py)"]
+        B["Chat CLI<br/>(cli.py)"]
         C["LangGraph Studio<br/>(langgraph.json)"]
     end
 
     subgraph LangGraph StateGraph
+        D0["chat"]
         D["orchestrator"]
         E["advisory"]
         F["fetch_features"]
         G["fetch_scores"]
+        V["validation"]
         H["compute_score"]
         I["geospatial"]
         J["explainability"]
         K["insight"]
+        CR["chat_response"]
         L["error_handler"]
     end
 
     subgraph Backend
         M["Tools Layer"]
         N["Scoring Engine"]
+        VT["Validation Tools"]
         O["LLM - Groq"]
         P[("PostgreSQL + PostGIS")]
     end
 
-    A --> D
-    B --> D
-    C --> D
+    A --> D0
+    B --> D0
+    C --> D0
+    D0 --> D
+    D0 -->|direct/follow-up| CR
     D --> E
     D --> F
     D --> I
@@ -76,21 +91,26 @@ graph TB
     E --> F
     F --> G
     F -.->|err| L
-    G --> H
+    G --> V
     G -.->|err| L
+    V --> H
+    V -.->|block| L
     H --> J
     H -.->|err| L
     I --> K
     J --> K
     J -.->|err| L
-    L --> END["__end__"]
-    K --> END
+    K --> CR
+    CR --> END["__end__"]
+    L --> END
 
     F -.-> M
     G -.-> M
     H -.-> N
+    V -.-> VT
     E -.-> O
     K -.-> O
+    D0 -.-> O
     M -.-> P
 ```
 
@@ -98,8 +118,10 @@ graph TB
 
 | Principle | Implementation |
 |---|---|
+| **Chat-first** | All interactions start at the `chat` node — natural language in, structured analysis out |
 | **Graph-first** | All routes call the LangGraph graph — never tools or scoring directly |
-| **LLM isolation** | LLM is called in only 2 nodes: `advisory` and `insight` |
+| **Validate before scoring** | Legal, proximity, environmental checks run before any score is computed |
+| **LLM isolation** | LLM is called in only 3 nodes: `chat`, `advisory`, and `insight` |
 | **Deterministic scoring** | The scoring engine has zero randomness, zero LLM calls |
 | **Explainability** | Every score includes per-dimension contribution breakdown |
 | **Swappable LLM** | Change `LLM_PROVIDER` in `.env` — no code changes needed |
@@ -108,11 +130,15 @@ graph TB
 
 ## Agent Graph
 
-The system uses a **LangGraph StateGraph** with 9 nodes and conditional routing. Every pipeline node checks for errors and routes to `error_handler` on failure.
+The system uses a **LangGraph StateGraph** with 12 nodes and conditional routing. Every pipeline node checks for errors and routes to `error_handler` on failure.
 
 ```mermaid
 flowchart TD
-    START(["__start__"]) --> orchestrator
+    START(["__start__"]) --> chat
+
+    chat --> |needs_graph| orchestrator
+    chat --> |direct_answer/follow_up| END_DIRECT(["__end__"])
+    chat --> |off_topic| END_DIRECT
 
     orchestrator --> advisory
     orchestrator --> fetch_features
@@ -124,8 +150,11 @@ flowchart TD
     fetch_features -->|ok| fetch_scores
     fetch_features -.->|err| error_handler
 
-    fetch_scores -->|ok| compute_score
+    fetch_scores -->|ok| validation
     fetch_scores -.->|err| error_handler
+
+    validation -->|pass/warn| compute_score
+    validation -.->|block| error_handler
 
     compute_score -->|ok| explainability
     compute_score -.->|err| error_handler
@@ -135,19 +164,24 @@ flowchart TD
 
     geospatial --> insight
 
-    insight --> END(["__end__"])
+    insight --> chat_response
+    chat_response --> END(["__end__"])
     error_handler --> END
 
     style START fill:#1a1a2e,stroke:#e94560,color:#fff
     style END fill:#1a1a2e,stroke:#e94560,color:#fff
+    style END_DIRECT fill:#1a1a2e,stroke:#e94560,color:#fff
+    style chat fill:#1a2e1a,stroke:#4CAF50,color:#a5d6a7
     style orchestrator fill:#16213e,stroke:#0f3460,color:#e0e0e0
     style advisory fill:#2d2d0f,stroke:#b8860b,color:#ffd700
     style fetch_features fill:#0d3320,stroke:#2e8b57,color:#90ee90
     style fetch_scores fill:#0d3320,stroke:#2e8b57,color:#90ee90
+    style validation fill:#2d1a2d,stroke:#9C27B0,color:#E1BEE7
     style compute_score fill:#0d3320,stroke:#2e8b57,color:#90ee90
     style geospatial fill:#1a1a3e,stroke:#6a5acd,color:#b8b8ff
     style explainability fill:#2d1a1a,stroke:#cd5c5c,color:#ffb6b6
     style insight fill:#1a1a3e,stroke:#6a5acd,color:#b8b8ff
+    style chat_response fill:#1a2e1a,stroke:#4CAF50,color:#a5d6a7
     style error_handler fill:#2d1a1a,stroke:#8b0000,color:#ff6b6b
 ```
 
@@ -155,27 +189,40 @@ flowchart TD
 
 | Node | File | LLM? | Purpose |
 |---|---|---|---|
-| `orchestrator` | `agents/orchestrator.py` | ❌ | Validate input, detect intent, route |
+| `chat` | `agents/chat.py` | ✅ | Intent detection, follow-up answers, off-topic handling |
+| `orchestrator` | `agents/orchestrator.py` | ❌ | Validate input, detect graph intent, route |
 | `advisory` | `agents/advisory.py` | ✅ | Recommend scoring weights for use case |
 | `fetch_features` | `agents/graph.py` | ❌ | Fetch 68-column row from PostgreSQL via PostGIS |
 | `fetch_scores` | `agents/graph.py` | ❌ | Fetch Layer 7 precomputed scores |
+| `validation` | `agents/graph.py` | ❌ | Legal, proximity, environmental, viability checks |
 | `compute_score` | `agents/graph.py` | ❌ | Weighted-sum final score calculation |
 | `geospatial` | `agents/geospatial.py` | ❌ | Hotspot detection, catchment analysis |
 | `explainability` | `agents/graph.py` | ❌ | Score breakdown with strengths/weaknesses |
 | `insight` | `agents/insight.py` | ✅ | Natural language insight from structured data |
+| `chat_response` | `agents/chat.py` | ❌ | Format final response, set analysis_complete |
 | `error_handler` | `agents/graph.py` | ❌ | Graceful error formatting |
 
 ### Intent Routing
 
-The orchestrator detects intent **deterministically** (no LLM) based on the request shape:
+The **chat node** classifies user intent via LLM:
+
+| Intent | Action |
+|---|---|
+| `needs_graph` | Extract lat/lng/use_case → run orchestrator → full pipeline |
+| `direct_answer` | Answer general system questions from LLM (no DB) |
+| `follow_up` | Answer from existing state data (post-analysis) |
+| `off_topic` | Redirect politely, increment retry counter |
+| `ask_field` | Ask for missing information (one field at a time) |
+
+The **orchestrator** detects graph intent **deterministically** (no LLM):
 
 ```mermaid
 flowchart LR
-    O["orchestrator"] --> |advise_weights| A["advisory → fetch_features → fetch_scores → compute_score → explainability → insight"]
-    O --> |score_site| B["fetch_features → fetch_scores → compute_score → explainability → insight"]
-    O --> |compare_sites| C["fetch_features → fetch_scores → compute_score → explainability → insight"]
+    O["orchestrator"] --> |advise_weights| A["advisory → fetch → validate → score → explain → insight"]
+    O --> |score_site| B["fetch → validate → score → explain → insight"]
+    O --> |compare_sites| C["fetch → validate → score → explain → insight"]
     O --> |find_hotspots| D["geospatial → insight"]
-    O --> |explain_result| E["fetch_features → fetch_scores → explainability → insight"]
+    O --> |explain_result| E["fetch → validate → score → explain → insight"]
     O --> |error| F["error_handler"]
 ```
 
@@ -185,7 +232,7 @@ flowchart LR
 class AgentState(TypedDict, total=False):
     # Input
     thread_id: str
-    use_case: str                            # "retail" | "ev_charging" | "warehouse" | "telecom" | "renewable"
+    use_case: str                            # any key in USE_CASE_CATALOG
     site_input: SiteInput                    # lat, lng
     user_weights: Optional[WeightConfig]     # 6 weights (0.0–1.0, sum=1.0)
 
@@ -193,6 +240,7 @@ class AgentState(TypedDict, total=False):
     intent: str                              # detected by orchestrator
     current_node: str
     error: Optional[str]
+    state_name: str                          # for hotspot queries
 
     # Data (populated progressively)
     site_features: Optional[SiteFeatures]
@@ -206,7 +254,88 @@ class AgentState(TypedDict, total=False):
     insight_text: str
     advisory_text: Optional[str]
     recommended_weights: Optional[WeightConfig]
+
+    # Chat layer
+    conversation_history: List[dict]
+    chat_intent: str                         # needs_graph | direct_answer | follow_up | off_topic
+    missing_fields: List[str]
+    retry_count: int
+    analysis_complete: bool
+    raw_user_message: str
+    chat_response: str
+
+    # Validation
+    validation_warnings: List[str]
 ```
+
+---
+
+## Chat Interface
+
+The chat node is the **single entry point** for all user interaction. It replaces the old menu-based CLI with free-text input.
+
+### Capabilities
+
+- Parse natural language to extract `lat`, `lng`, `use_case`, `weights`
+- Detect intent: `needs_graph` / `direct_answer` / `follow_up` / `off_topic`
+- Ask ONE follow-up question at a time if info is missing
+- After graph runs, accept follow-up questions using existing state data
+- Enforce topic boundaries (only location/business questions)
+- Enforce max retry limits (3 off-topic messages → session ends)
+
+### Example Interactions
+
+```
+You: Score a retail site at 23.02, 72.57
+Analyzer: Analyzing a retail site at (23.02, 72.57)...
+          [Score: 74.2/100 — breakdown table follows]
+
+You: Why is the risk score low?
+Analyzer: The risk score of 42 is low because the site has a flood risk
+          score of 65 and AQI of 120, both indicating moderate environmental
+          concerns for this location.
+
+You: What is the weather like?
+Analyzer: I can only help with site selection and business location analysis.
+          Try asking: 'Score a retail site at 23.02, 72.57'
+```
+
+---
+
+## Validation Framework
+
+Location-aware validation runs **before scoring** to catch legal, regulatory, and viability issues.
+
+### Validators
+
+| Validator | File | What it checks |
+|---|---|---|
+| **Legal** | `tools/validation_tools.py` | State-level prohibitions (e.g. alcohol in Gujarat) |
+| **Proximity** | `tools/validation_tools.py` | Distance rules (liquor near schools, chemicals in residential) |
+| **Environmental** | `tools/validation_tools.py` | Flood risk, earthquake risk, severe AQI |
+| **Land Use** | `tools/validation_tools.py` | Agricultural land detection, industrial zoning |
+| **Viability** | `tools/validation_tools.py` | Population density, competitor saturation, power reliability |
+
+### Result Types
+
+| Status | Action | Example |
+|---|---|---|
+| `block` | Stop processing, show error | "Alcohol is prohibited in Gujarat" |
+| `warn` | Apply score penalty, continue | "High seismic risk — IS 1893 compliance required" |
+| `pass` | No action | — |
+
+### Score Penalties
+
+Warnings apply point deductions to specific scoring dimensions:
+
+| Rule | Penalty Dimension | Points |
+|---|---|---|
+| Healthcare near industrial zone | `risk_score` | −15 |
+| Education near high AQI | `risk_score` | −10 |
+| Food business in severe AQI | `suitability_score` | −10 |
+| Fuel station in residential | `risk_score` | −8 |
+| Low population density | `demand_score` | −20 |
+| High competitor saturation | `competition_score` | −15 |
 
 ---
 
@@ -225,16 +354,6 @@ Where `i` ∈ `{demand, accessibility, competition, suitability, risk, infrastru
 - Each dimension score is **0–100** (precomputed by ETL pipeline)
 - Each weight is **0.0–1.0** (sum = 1.0)
 - Output: **0–100**
-
-### Default Weights by Use Case
-
-| Use Case | Demand | Accessibility | Competition | Suitability | Risk | Infrastructure |
-|---|---|---|---|---|---|---|
-| Retail | 0.30 | 0.20 | 0.20 | 0.10 | 0.10 | 0.10 |
-| EV Charging | 0.25 | 0.30 | 0.05 | 0.10 | 0.10 | 0.20 |
-| Warehouse | 0.15 | 0.35 | 0.05 | 0.15 | 0.15 | 0.15 |
-| Telecom | 0.10 | 0.25 | 0.10 | 0.15 | 0.15 | 0.25 |
-| Renewable | 0.10 | 0.20 | 0.05 | 0.25 | 0.20 | 0.20 |
 
 ### Explainability Output
 
@@ -255,13 +374,41 @@ Every score returns a breakdown:
 }
 ```
 
-### Supporting Modules
+---
 
-| Module | Purpose |
-|---|---|
-| `scoring/normalizer.py` | Min-max, clipped, and inverted normalization |
-| `scoring/formulas.py` | Distance decay functions (inverse-square, exponential, linear) |
-| `scoring/weights.py` | Hardcoded default weight configs per use case |
+## Use Case Catalog
+
+95 business types across 15 categories with individually tuned default weights. See `scoring/weights.py` for the full catalog.
+
+### Categories
+
+| Category | Examples | Count |
+|---|---|---|
+| Necessity & Civic | Public toilet, post office, fire station | 8 |
+| Healthcare | Hospital, clinic, pharmacy, dialysis centre | 10 |
+| Education | School, college, library, vocational training | 6 |
+| Food & Beverage | Restaurant, café, cloud kitchen, liquor store | 11 |
+| Retail & Commerce | Retail store, supermarket, showroom | 5 |
+| Energy & Fuel | Petrol pump, EV charging, solar plant | 8 |
+| Finance & Banking | Bank branch, ATM, microfinance | 4 |
+| Fun & Leisure | Multiplex, sports complex, spa | 9 |
+| Hospitality | Hotel, dharamshala | 2 |
+| Industrial / GIDC | Warehouse, GIDC plot, textile factory | 8 |
+| Chemical & Process | Chemical factory, pharma, ETP | 5 |
+| Logistics | Cold storage, delivery hub, truck terminal | 4 |
+| Professional Services | Co-working, gym, salon, data centre | 8 |
+| Religious & Civic | Place of worship | 1 |
+| Agriculture | Agri input store, greenhouse, aquaculture | 4 |
+
+### Sample Default Weights
+
+| Use Case | Demand | Access | Comp | Suit | Risk | Infra |
+|---|---|---|---|---|---|---|
+| Retail | 0.30 | 0.20 | 0.20 | 0.10 | 0.10 | 0.10 |
+| EV Charging | 0.25 | 0.30 | 0.05 | 0.10 | 0.10 | 0.20 |
+| Hospital | 0.30 | 0.25 | 0.10 | 0.10 | 0.15 | 0.10 |
+| Warehouse | 0.15 | 0.35 | 0.05 | 0.15 | 0.15 | 0.15 |
+| Data Centre | 0.10 | 0.20 | 0.05 | 0.15 | 0.20 | 0.30 |
 
 ---
 
@@ -288,12 +435,6 @@ Single table: `site_features` with **68 columns** across 7 layers:
 - No H3 dependency — all spatial operations use native PostGIS
 - `ST_DWithin` is used for radius/catchment queries
 - The `geom` column is auto-populated from `latitude`/`longitude` by the `sync_job.py` loader
-
-### Important Notes
-
-- **`competitor_count`** is stored as-is from the pipeline. At query time, the scoring engine can override it dynamically based on `use_case` → relevant POI category columns
-- All **Layer 7 scores are precomputed** by the ETL pipeline — the backend reads them directly, does not recompute them
-- See [`DERIVED_COLUMNS.md`](./DERIVED_COLUMNS.md) for formulas used to compute Layer 7 scores
 
 ---
 
@@ -324,62 +465,46 @@ curl -X POST http://localhost:8000/score \
   }'
 ```
 
-Response includes `site_score`, `score_breakdown`, `insight_text`, and optional `advisory_text`.
-
-### Example: Compare Sites
-
-```bash
-curl -X POST http://localhost:8000/compare \
-  -H "Content-Type: application/json" \
-  -d '{
-    "sites": [
-      {"lat": 23.0225, "lng": 72.5714},
-      {"lat": 23.0300, "lng": 72.5800},
-      {"lat": 22.9900, "lng": 72.5500}
-    ],
-    "use_case": "retail"
-  }'
-```
-
-### Example: Find Hotspots
-
-```bash
-curl -X POST http://localhost:8000/hotspots \
-  -H "Content-Type: application/json" \
-  -d '{
-    "state": "Gujarat",
-    "use_case": "ev_charging",
-    "top_n": 10
-  }'
-```
+Response includes `site_score`, `score_breakdown`, `insight_text`, `validation_warnings`, and optional `advisory_text`.
 
 ---
 
 ## CLI Interface
 
-Interactive menu-based CLI built with **Rich** + **Typer**.
+Conversational chat CLI built with **Rich**.
 
 ```
-╔══════════════════════════════════════╗
-║   GeoSpatial Site Readiness Analyzer ║
-╚══════════════════════════════════════╝
+╭─────────────────────────────────────────────────╮
+│   GeoSpatial Site Readiness Analyzer            │
+│   Ask me anything — 'Score a retail site at     │
+│   23.02, 72.57' or 'Find EV hotspots in Gujarat'│
+╰─────────────────────────────────────────────────╯
 
-  1. Score a site
-  2. Compare multiple sites
-  3. Find hotspots in a state
-  4. Exit
+You: Score a retail site at 23.02, 72.57
+
+  Thinking...
+
+Analyzer: Analyzing a retail site at (23.02, 72.57)...
+
+  ┌─ Site Readiness Score: 74.2 / 100   ▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░ ─┐
+  │                                                               │
+  └───────────────────────────────────────────────────────────────┘
+
+  ┌─ Score Breakdown ──────────────────────────────────────────────┐
+  │ Dimension           │  Raw │ Weight │ Contribution │ Visual   │
+  │ Demand Score        │   74 │   0.30 │        22.2  │ ████████ │
+  │ ...                 │      │        │              │          │
+  └─────────────────────────────────────────────────────────────────┘
 ```
 
 ### Features
 
-- **Guided input** — step-by-step prompts for location, use case, and weights
-- **Visual score bar** — `▓▓▓▓▓▓░░░░` progress indicator for the readiness score
+- **Free-text input** — no menus, just natural conversation
+- **Follow-up questions** — ask about scores after analysis
+- **Validation warnings** — regulatory issues shown in yellow
 - **Rich tables** — comparison and hotspot results in formatted tables
-- **Score breakdown** — per-dimension contribution with `████` visual bars
-- **Spinner progress** — animated "Running analysis..." during graph execution
-- **Error panels** — friendly red panels for errors (no raw stack traces)
-
-Each CLI run generates a fresh `thread_id` (UUID4) — stateless per run.
+- **Score breakdown** — per-dimension contribution with visual bars
+- **Off-topic handling** — polite redirects with escalation
 
 ---
 
@@ -388,7 +513,7 @@ Each CLI run generates a fresh `thread_id` (UUID4) — stateless per run.
 ```
 geo_site_v2/
 ├── main.py                       # FastAPI app entry point
-├── cli.py                        # Menu-based CLI (Typer + Rich)
+├── cli.py                        # Conversational chat CLI (Rich)
 ├── sync_job.py                   # CSV → PostgreSQL data loader
 ├── pyproject.toml                # Dependencies & project config
 ├── requirements.txt              # pip-compatible dependency list
@@ -397,33 +522,13 @@ geo_site_v2/
 ├── .env.example                  # Environment variable template
 ├── SETUP.md                      # Database setup & install guide
 ├── DERIVED_COLUMNS.md            # Layer 7 score formulas
+├── FRONTEND_INTEGRATION.md       # Frontend integration guide
 ├── README.md                     # This file
 │
-├── data/                         # CSV data directory (gitignored)
-│
-├── migrations/                   # Alembic database migrations
-│   ├── env.py                    # Migration environment (reads .env)
-│   ├── script.py.mako            # Migration file template
-│   └── versions/
-│       ├── 001_initial_schema.py # Initial schema (72 cols)
-│       └── 002_update_schema.py  # Schema v2 (68 cols, no H3)
-│
-├── logs/                         # Application logs (gitignored)
-│   └── agent_app.log             # Rotating log file (5MB × 3 backups)
-│
-├── core/                         # Configuration & infrastructure
-│   ├── config.py                 # pydantic-settings (.env loader)
-│   ├── database.py               # Async SQLAlchemy engine + session factory
-│   ├── logger.py                 # Centralized logging (setup_logging + get_logger)
-│   └── exceptions.py             # 6 custom exception classes
-│
-├── llm/                          # LLM abstraction layer
-│   ├── llm_config.py             # Provider-agnostic factory (Groq/OpenAI/Anthropic/Ollama)
-│   └── prompts.py                # All system/user prompt templates
-│
 ├── agents/                       # LangGraph multi-agent system
-│   ├── state.py                  # AgentState TypedDict
-│   ├── graph.py                  # StateGraph definition (9 nodes, conditional edges)
+│   ├── state.py                  # AgentState TypedDict (30+ fields)
+│   ├── graph.py                  # StateGraph definition (12 nodes, conditional edges)
+│   ├── chat.py                   # Chat node — intent detection, follow-up, off-topic
 │   ├── orchestrator.py           # Deterministic intent routing (no LLM)
 │   ├── advisory.py               # LLM weight advisor node
 │   ├── geospatial.py             # Spatial operations node (no LLM)
@@ -432,7 +537,7 @@ geo_site_v2/
 ├── scoring/                      # Deterministic scoring engine
 │   ├── engine.py                 # Weighted-sum computation + contributions
 │   ├── normalizer.py             # Min-max, clipped, inverted normalization
-│   ├── weights.py                # Default weight configs (5 use cases)
+│   ├── weights.py                # USE_CASE_CATALOG (95 use cases, 15 categories)
 │   └── formulas.py               # Distance decay functions
 │
 ├── tools/                        # Tool functions (called by agent nodes)
@@ -440,21 +545,36 @@ geo_site_v2/
 │   ├── scoring_tools.py          # Score computation + ranking wrappers
 │   ├── spatial_tools.py          # PostGIS spatial queries, hotspot detection
 │   ├── explainability_tools.py   # Score breakdown + what-if analysis
-│   └── config_tools.py           # Weight validation + normalization
+│   ├── config_tools.py           # Weight validation + normalization
+│   └── validation_tools.py       # Legal, proximity, environmental, viability checks
 │
 ├── models/                       # Pydantic v2 data models
-│   ├── site.py                   # SiteFeatures (68 cols), SiteScore, ScoreBreakdown, etc.
+│   ├── site.py                   # SiteFeatures (68 cols), SiteScore, ScoreBreakdown
 │   ├── weights.py                # WeightConfig (sum-to-1.0 validator)
 │   ├── request.py                # API request/response schemas
 │   └── agent.py                  # Agent I/O models
 │
-└── api/                          # FastAPI route layer
-    ├── dependencies.py           # DB session injection, auth placeholder
-    └── routes/
-        ├── sites.py              # GET /sites/{site_id}, GET /sites/nearest
-        ├── scoring.py            # POST /score, POST /score/what-if
-        ├── comparison.py         # POST /compare
-        └── hotspots.py           # POST /hotspots
+├── llm/                          # LLM abstraction layer
+│   ├── llm_config.py             # Provider-agnostic factory
+│   └── prompts.py                # All system/user prompt templates
+│
+├── core/                         # Configuration & infrastructure
+│   ├── config.py                 # pydantic-settings (.env loader)
+│   ├── database.py               # Async SQLAlchemy engine + session factory
+│   ├── logger.py                 # Centralized logging
+│   └── exceptions.py             # Custom exception classes
+│
+├── api/                          # FastAPI route layer
+│   ├── dependencies.py           # DB session injection
+│   └── routes/
+│       ├── sites.py              # GET /sites/{site_id}, GET /sites/nearest
+│       ├── scoring.py            # POST /score, POST /score/what-if
+│       ├── comparison.py         # POST /compare
+│       └── hotspots.py           # POST /hotspots
+│
+└── experiments/                  # Jupyter notebooks for testing
+    ├── agent-test.ipynb          # Original graph tests
+    └── agent-chat-test.ipynb     # Chat + validation workflow tests
 ```
 
 ---
@@ -472,7 +592,7 @@ geo_site_v2/
 | Schema Validation | Pydantic v2 |
 | Spatial Indexing | PostGIS GIST index (`<->` operator) |
 | Data Loading | Pandas + psycopg2 (`sync_job.py`) |
-| CLI | Rich + Typer |
+| CLI | Rich |
 | Config | pydantic-settings + `.env` |
 | Observability | LangSmith tracing (via LangGraph Studio) |
 
@@ -540,7 +660,7 @@ python sync_job.py --truncate        # fresh load
 # 7. Start API server
 uvicorn main:app --reload --port 8000
 
-# 8. Or run CLI
+# 8. Or run CLI (conversational chat)
 python -m cli
 
 # 9. Or run in LangGraph Studio
@@ -549,6 +669,8 @@ langgraph dev
 ```
 
 For detailed database setup and SQL schema, see **[SETUP.md](./SETUP.md)**.
+
+For frontend integration, see **[FRONTEND_INTEGRATION.md](./FRONTEND_INTEGRATION.md)**.
 
 ---
 
@@ -559,28 +681,34 @@ For detailed database setup and SQL schema, see **[SETUP.md](./SETUP.md)**.
 - **State persistence** — Postgres checkpointer enables debugging and replay
 - **Conditional routing** — Intent-based graph traversal without spaghetti if/else
 - **Observability** — LangGraph Studio visualizes execution in real-time
-- **Extensibility** — New nodes (e.g., a "competitor analysis" agent) can be added without rewiring existing logic
+- **Extensibility** — New nodes can be added without rewiring existing logic
+
+### Why a chat node?
+
+- **Natural interface** — Users describe what they want in plain language
+- **Context awareness** — Follow-up questions use existing analysis data
+- **Session management** — Retry limits prevent abuse, history enables context
+- **Single entry point** — All paths (API, CLI, Studio) go through one node
+
+### Why validation before scoring?
+
+- **Fail fast** — Block illegal sites immediately (e.g., liquor in Gujarat)
+- **Score accuracy** — Penalties adjust scores to reflect regulatory reality
+- **User trust** — Warnings about regulations build confidence in the system
+- **Separation of concerns** — Rule tables in `validation_tools.py`, not scattered in nodes
 
 ### Why PostGIS over H3?
 
 - **Native spatial indexing** — GIST index with `<->` operator gives O(log n) nearest-neighbor
-- **No external dependency** — PostGIS ships with PostgreSQL, no separate C library (H3) needed
-- **Flexible queries** — `ST_DWithin` for radius/catchment, `<->` for nearest, all in SQL
-- **Simpler data model** — `id` primary key (IND_XXXXXXX) vs. hex-encoded H3 cell IDs
+- **No external dependency** — PostGIS ships with PostgreSQL
+- **Flexible queries** — `ST_DWithin` for radius/catchment, all in SQL
 
 ### Why deterministic scoring?
 
 - **Reproducibility** — Same inputs always produce the same score
 - **Auditability** — Every contribution is traceable (`raw × weight = contribution`)
 - **Speed** — No LLM call needed for the core calculation
-- **LLM for interpretation only** — The insight node converts numbers to narrative, it doesn't generate numbers
-
-### Why two LLM nodes, not one?
-
-- **Advisory** specializes in weight recommendation (structured JSON output)
-- **Insight** specializes in natural language summarization (free-form text)
-- Different system prompts, different output formats, different failure modes
-- Each has its own graceful fallback (defaults for advisory, template for insight)
+- **LLM for interpretation only** — The insight node converts numbers to narrative
 
 ---
 
