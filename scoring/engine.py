@@ -64,7 +64,7 @@ def compute_final_score(
 
     logger.info(
         "Score computed for %s: %.2f (contributions: %s)",
-        precomputed_scores.grid_id,
+        precomputed_scores.id,
         site_readiness_score,
         contributions,
     )
@@ -74,7 +74,7 @@ def compute_final_score(
     )
 
     return SiteScore(
-        grid_id=precomputed_scores.grid_id,
+        id=precomputed_scores.id,
         lat=lat,
         lng=lng,
         site_readiness_score=site_readiness_score,

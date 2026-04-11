@@ -1,6 +1,9 @@
 """
 models/site.py — SiteInput, SiteFeatures, PrecomputedScores, SiteScore, HotspotResult,
                   CatchmentResult, ScoreBreakdown, and WhatIfResult Pydantic models.
+
+Schema v2: No H3. Primary key is `id` (format: IND_XXXXXXX).
+Spatial lookup via PostGIS <-> operator.
 """
 
 from datetime import datetime
@@ -14,34 +17,31 @@ from models.weights import WeightConfig
 # ── Input Models ──────────────────────────────────────────────────────────
 
 class SiteInput(BaseModel):
-    """User-provided site location."""
+    """User-provided site location (lat/lng only — no H3)."""
 
     lat: float = Field(..., description="Latitude")
     lng: float = Field(..., description="Longitude")
-    h3_id: Optional[str] = Field(None, description="H3 grid ID (auto-computed if omitted)")
 
 
 # ── Feature / Score Models ────────────────────────────────────────────────
 
 class SiteFeatures(BaseModel):
-    """All columns for an H3 cell row from the site_features table (72 columns)."""
+    """All columns for a row from the site_features table (68 columns after v2 migration)."""
 
     model_config = ConfigDict(extra="ignore")
 
-    # Layer 0 — Identifiers
-    id: Optional[str] = None
-    grid_id: str
+    # Identifiers
+    id: str  # format: IND_XXXXXXX (primary key)
     latitude: float
     longitude: float
     state: str = ""
     district: str = ""
-    area_name: str = ""
     geom: Optional[str] = None  # WKB hex string returned by asyncpg for GEOMETRY columns
 
     # Layer 1 — Demographics (WorldPop · Census 2011 · VIIRS)
+    population_density: Optional[float] = None
     population_1km: Optional[float] = None
     population_5km: Optional[float] = None
-    population_density: Optional[float] = None
     male_population: Optional[float] = None
     female_population: Optional[float] = None
     sex_ratio: Optional[float] = None
@@ -51,9 +51,7 @@ class SiteFeatures(BaseModel):
     child_ratio: Optional[float] = None
     working_age_ratio: Optional[float] = None
     dependency_ratio: Optional[float] = None
-    household_count: Optional[float] = None
     literacy_rate: Optional[float] = None
-    income_level: Optional[float] = None
 
     # Layer 2 — Transportation (OSM · OSRM)
     road_density: Optional[float] = None
@@ -122,7 +120,7 @@ class SiteFeatures(BaseModel):
 class PrecomputedScores(BaseModel):
     """Layer 7 precomputed dimension scores (0–100 each)."""
 
-    grid_id: str
+    id: str  # site identifier (IND_XXXXXXX)
     demand_score: float = Field(..., ge=0.0, le=100.0)
     accessibility_score: float = Field(..., ge=0.0, le=100.0)
     competition_score: float = Field(..., ge=0.0, le=100.0)
@@ -152,7 +150,7 @@ class ScoreBreakdown(BaseModel):
 class SiteScore(BaseModel):
     """Final weighted site readiness score with full provenance."""
 
-    grid_id: str
+    id: str  # site identifier
     lat: float
     lng: float
     site_readiness_score: float = Field(..., ge=0.0, le=100.0)
@@ -164,12 +162,11 @@ class SiteScore(BaseModel):
 class HotspotResult(BaseModel):
     """A single hotspot entry from spatial analysis."""
 
-    grid_id: str
+    id: str
     lat: float
     lng: float
     state: str
     district: str
-    area_name: str = ""
     site_readiness_score: float
     precomputed_scores: PrecomputedScores
 
@@ -177,7 +174,7 @@ class HotspotResult(BaseModel):
 class CatchmentResult(BaseModel):
     """Result of a catchment (radius) query."""
 
-    center_h3_id: str
+    center_id: str
     radius_km: float
     cell_count: int
     cells: List[SiteFeatures]

@@ -1,16 +1,13 @@
 """
 tools/site_tools.py — Database fetch functions for site features and scores.
 
-Uses direct H3 grid_id lookup (O(1)) rather than ST_NearestNeighbor.
+Uses PostGIS <-> operator for nearest-neighbor spatial lookup.
+No H3 dependency.
 """
 
-from typing import Optional
-
-import h3
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.config import get_settings
 from core.exceptions import SiteNotFoundError
 from core.logger import get_logger
 from models.site import PrecomputedScores, SiteFeatures
@@ -21,46 +18,46 @@ logger = get_logger(__name__)
 async def fetch_site_features(
     lat: float,
     lng: float,
-    h3_id: Optional[str],
     db: AsyncSession,
 ) -> SiteFeatures:
     """
-    Query PostgreSQL for all columns for the nearest H3 cell.
+    Find the nearest site_features row to the given lat/lng using PostGIS.
 
-    - If ``h3_id`` is provided: direct lookup by grid_id.
-    - If only lat/lng: use H3 library to compute h3_id at the configured
-      resolution, then lookup.
+    Uses the ``<->`` operator with the GIST spatial index for fast
+    nearest-neighbour lookup — no full table scan.
 
     Raises
     ------
     SiteNotFoundError
         If no matching row is found.
     """
-    if h3_id is None:
-        settings = get_settings()
-        h3_id = h3.latlng_to_cell(lat, lng, settings.h3_resolution)
-        logger.debug("Computed H3 cell %s from lat=%.4f, lng=%.4f", h3_id, lat, lng)
+    logger.info("Fetching site features for lat=%.4f, lng=%.4f", lat, lng)
 
-    logger.info("Fetching site features for H3 cell: %s", h3_id)
-    query = text("SELECT * FROM site_features WHERE grid_id = :grid_id LIMIT 1")
-    result = await db.execute(query, {"grid_id": h3_id})
+    query = text("""
+        SELECT *
+        FROM site_features
+        ORDER BY geom <-> ST_SetSRID(ST_MakePoint(:lng, :lat), 4326)
+        LIMIT 1;
+    """)
+    result = await db.execute(query, {"lat": lat, "lng": lng})
     row = result.mappings().fetchone()
 
     if row is None:
-        logger.warning("Site not found for H3 cell: %s", h3_id)
-        raise SiteNotFoundError(h3_id)
+        logger.warning("Site not found near lat=%.4f, lng=%.4f", lat, lng)
+        raise SiteNotFoundError(f"lat={lat}, lng={lng}")
 
-    logger.info("Site features loaded for %s", h3_id)
+    features = SiteFeatures(**dict(row))
+    logger.info("Site features loaded for %s", features.id)
 
-    return SiteFeatures(**dict(row))
+    return features
 
 
 async def fetch_precomputed_scores(
-    h3_id: str,
+    site_id: str,
     db: AsyncSession,
 ) -> PrecomputedScores:
     """
-    Fetch Layer 7 precomputed scores for the given H3 cell.
+    Fetch Layer 7 precomputed scores for the given site ID.
 
     These scores are already normalised to 0–100 and stored in the
     ``site_features`` table.
@@ -72,7 +69,7 @@ async def fetch_precomputed_scores(
     """
     query = text(
         """
-        SELECT grid_id,
+        SELECT id,
                demand_score,
                accessibility_score,
                competition_score,
@@ -80,17 +77,17 @@ async def fetch_precomputed_scores(
                risk_score,
                infrastructure_score
         FROM site_features
-        WHERE grid_id = :grid_id
+        WHERE id = :site_id
         LIMIT 1
         """
     )
-    result = await db.execute(query, {"grid_id": h3_id})
+    result = await db.execute(query, {"site_id": site_id})
     row = result.mappings().fetchone()
 
     if row is None:
-        logger.warning("Precomputed scores not found for H3 cell: %s", h3_id)
-        raise SiteNotFoundError(h3_id)
+        logger.warning("Precomputed scores not found for site: %s", site_id)
+        raise SiteNotFoundError(site_id)
 
-    logger.info("Precomputed scores loaded for %s", h3_id)
+    logger.info("Precomputed scores loaded for %s", site_id)
 
     return PrecomputedScores(**dict(row))

@@ -27,8 +27,8 @@ The system answers a simple question: **"How suitable is this location for my bu
 
 Given a latitude/longitude and a business use case (retail, EV charging, warehouse, telecom, renewable energy), it:
 
-1. Resolves the location to an **H3 hexagonal grid cell** (resolution 8)
-2. Fetches **71 precomputed geospatial features** from PostgreSQL
+1. Finds the **nearest site** using PostGIS spatial indexing (`<->` operator)
+2. Fetches **68 precomputed geospatial features** from PostgreSQL
 3. Applies a **weighted scoring formula** across 6 dimensions
 4. Generates an **explainable score breakdown** (strengths, weaknesses, contributions)
 5. Produces a **natural language insight** via LLM
@@ -157,7 +157,7 @@ flowchart TD
 |---|---|---|---|
 | `orchestrator` | `agents/orchestrator.py` | ❌ | Validate input, detect intent, route |
 | `advisory` | `agents/advisory.py` | ✅ | Recommend scoring weights for use case |
-| `fetch_features` | `agents/graph.py` | ❌ | Fetch 71-column row from PostgreSQL |
+| `fetch_features` | `agents/graph.py` | ❌ | Fetch 68-column row from PostgreSQL via PostGIS |
 | `fetch_scores` | `agents/graph.py` | ❌ | Fetch Layer 7 precomputed scores |
 | `compute_score` | `agents/graph.py` | ❌ | Weighted-sum final score calculation |
 | `geospatial` | `agents/geospatial.py` | ❌ | Hotspot detection, catchment analysis |
@@ -186,7 +186,7 @@ class AgentState(TypedDict, total=False):
     # Input
     thread_id: str
     use_case: str                            # "retail" | "ev_charging" | "warehouse" | "telecom" | "renewable"
-    site_input: SiteInput                    # lat, lng, optional h3_id
+    site_input: SiteInput                    # lat, lng
     user_weights: Optional[WeightConfig]     # 6 weights (0.0–1.0, sum=1.0)
 
     # Routing
@@ -269,12 +269,12 @@ Every score returns a breakdown:
 
 ### Database: PostgreSQL 15+ with PostGIS
 
-Single table: `site_features` with **71 data columns** across 7 layers:
+Single table: `site_features` with **68 columns** across 7 layers:
 
 | Layer | Category | Columns | Source |
 |---|---|---|---|
-| 0 | Identifiers | `id`, `grid_id`, `latitude`, `longitude`, `state`, `district`, `area_name` | H3 grid |
-| 1 | Demographics | `population_*`, `sex_ratio`, `dependency_ratio`, `household_count`, etc. | WorldPop, Census 2011, VIIRS |
+| 0 | Identifiers | `id`, `latitude`, `longitude`, `state`, `district`, `geom` | ETL pipeline |
+| 1 | Demographics | `population_density`, `population_*km`, `sex_ratio`, `dependency_ratio`, `literacy_rate`, etc. | WorldPop, Census 2011, VIIRS |
 | 2 | Transportation | `road_density`, `distance_to_highway`, `connectivity_score`, etc. | OSM, OSRM |
 | 3 | POI / Economic | `poi_count_*`, `competitor_count`, `restaurant_count`, `shop_count`, etc. | OSM |
 | 4 | Land Use | `commercial_ratio`, `residential_ratio`, `building_density`, etc. | OSM |
@@ -282,17 +282,18 @@ Single table: `site_features` with **71 data columns** across 7 layers:
 | 6 | Infrastructure | `distance_to_power_substation`, `public_transport_score`, etc. | OSM |
 | 7 | Derived Scores | `demand_score`, `accessibility_score`, ... (6 scores, 0–100) | ETL pipeline |
 
-### H3 Spatial Indexing
+### PostGIS Spatial Lookup
 
-- All locations are resolved to **H3 resolution 8** hexagons (~0.74 km² per cell)
-- Lookup is **O(1)** by `grid_id` — no `ST_NearestNeighbor` needed
-- H3 Python library handles `lat/lng → grid_id` conversion
-- PostGIS is used only for spatial queries (`ST_DWithin` for catchment analysis)
+- Nearest-site lookup uses the PostGIS **`<->` operator** with a GIST spatial index — O(log n)
+- No H3 dependency — all spatial operations use native PostGIS
+- `ST_DWithin` is used for radius/catchment queries
+- The `geom` column is auto-populated from `latitude`/`longitude` by the `sync_job.py` loader
 
 ### Important Notes
 
 - **`competitor_count`** is stored as-is from the pipeline. At query time, the scoring engine can override it dynamically based on `use_case` → relevant POI category columns
 - All **Layer 7 scores are precomputed** by the ETL pipeline — the backend reads them directly, does not recompute them
+- See [`DERIVED_COLUMNS.md`](./DERIVED_COLUMNS.md) for formulas used to compute Layer 7 scores
 
 ---
 
@@ -305,8 +306,8 @@ All routes are **async** and call the LangGraph graph (never tools directly).
 | Method | Endpoint | Description |
 |---|---|---|
 | `GET` | `/` | Health check |
-| `GET` | `/sites/{h3_id}` | Fetch all features for an H3 cell |
-| `GET` | `/sites/nearest/?lat=&lng=` | Find nearest H3 cell by coordinates |
+| `GET` | `/sites/{site_id}` | Fetch all features for a site by ID |
+| `GET` | `/sites/nearest/?lat=&lng=` | Find nearest site by coordinates |
 | `POST` | `/score` | Score a single site (full graph run) |
 | `POST` | `/score/what-if` | Compare two weight configurations |
 | `POST` | `/compare` | Compare and rank 2–5 sites |
@@ -388,19 +389,24 @@ Each CLI run generates a fresh `thread_id` (UUID4) — stateless per run.
 geo_site_v2/
 ├── main.py                       # FastAPI app entry point
 ├── cli.py                        # Menu-based CLI (Typer + Rich)
+├── sync_job.py                   # CSV → PostgreSQL data loader
 ├── pyproject.toml                # Dependencies & project config
 ├── requirements.txt              # pip-compatible dependency list
 ├── alembic.ini                   # Alembic migration config
 ├── langgraph.json                # LangGraph Studio configuration
 ├── .env.example                  # Environment variable template
 ├── SETUP.md                      # Database setup & install guide
+├── DERIVED_COLUMNS.md            # Layer 7 score formulas
 ├── README.md                     # This file
+│
+├── data/                         # CSV data directory (gitignored)
 │
 ├── migrations/                   # Alembic database migrations
 │   ├── env.py                    # Migration environment (reads .env)
 │   ├── script.py.mako            # Migration file template
 │   └── versions/
-│       └── 001_initial_schema.py # First migration: site_features table
+│       ├── 001_initial_schema.py # Initial schema (72 cols)
+│       └── 002_update_schema.py  # Schema v2 (68 cols, no H3)
 │
 ├── logs/                         # Application logs (gitignored)
 │   └── agent_app.log             # Rotating log file (5MB × 3 backups)
@@ -409,7 +415,7 @@ geo_site_v2/
 │   ├── config.py                 # pydantic-settings (.env loader)
 │   ├── database.py               # Async SQLAlchemy engine + session factory
 │   ├── logger.py                 # Centralized logging (setup_logging + get_logger)
-│   └── exceptions.py             # 7 custom exception classes
+│   └── exceptions.py             # 6 custom exception classes
 │
 ├── llm/                          # LLM abstraction layer
 │   ├── llm_config.py             # Provider-agnostic factory (Groq/OpenAI/Anthropic/Ollama)
@@ -430,14 +436,14 @@ geo_site_v2/
 │   └── formulas.py               # Distance decay functions
 │
 ├── tools/                        # Tool functions (called by agent nodes)
-│   ├── site_tools.py             # DB fetch: features + precomputed scores
+│   ├── site_tools.py             # DB fetch: features + precomputed scores (PostGIS)
 │   ├── scoring_tools.py          # Score computation + ranking wrappers
-│   ├── spatial_tools.py          # H3 utils, hotspot detection, catchment analysis
+│   ├── spatial_tools.py          # PostGIS spatial queries, hotspot detection
 │   ├── explainability_tools.py   # Score breakdown + what-if analysis
 │   └── config_tools.py           # Weight validation + normalization
 │
 ├── models/                       # Pydantic v2 data models
-│   ├── site.py                   # SiteFeatures (71 cols), SiteScore, ScoreBreakdown, etc.
+│   ├── site.py                   # SiteFeatures (68 cols), SiteScore, ScoreBreakdown, etc.
 │   ├── weights.py                # WeightConfig (sum-to-1.0 validator)
 │   ├── request.py                # API request/response schemas
 │   └── agent.py                  # Agent I/O models
@@ -445,7 +451,7 @@ geo_site_v2/
 └── api/                          # FastAPI route layer
     ├── dependencies.py           # DB session injection, auth placeholder
     └── routes/
-        ├── sites.py              # GET /sites/{h3_id}, GET /sites/nearest
+        ├── sites.py              # GET /sites/{site_id}, GET /sites/nearest
         ├── scoring.py            # POST /score, POST /score/what-if
         ├── comparison.py         # POST /compare
         └── hotspots.py           # POST /hotspots
@@ -464,7 +470,8 @@ geo_site_v2/
 | Database | PostgreSQL 15+ with PostGIS |
 | ORM / Queries | SQLAlchemy 2.0 (async) + raw SQL for spatial ops |
 | Schema Validation | Pydantic v2 |
-| Spatial Indexing | H3 Python library (resolution 8) |
+| Spatial Indexing | PostGIS GIST index (`<->` operator) |
+| Data Loading | Pandas + psycopg2 (`sync_job.py`) |
 | CLI | Rich + Typer |
 | Config | pydantic-settings + `.env` |
 | Observability | LangSmith tracing (via LangGraph Studio) |
@@ -522,15 +529,21 @@ pip install -r requirements.txt
 cp .env.example .env
 # Edit .env with your DB credentials and GROQ_API_KEY
 
-# 5. Set up PostgreSQL (see SETUP.md for full schema)
+# 5. Set up PostgreSQL and run migrations
+alembic upgrade head
 
-# 6. Start API server
+# 6. Load data into PostgreSQL
+python sync_job.py                   # auto-detects data/*.csv
+python sync_job.py --file data/india_sites.csv  # explicit path
+python sync_job.py --truncate        # fresh load
+
+# 7. Start API server
 uvicorn main:app --reload --port 8000
 
-# 7. Or run CLI
+# 8. Or run CLI
 python -m cli
 
-# 8. Or run in LangGraph Studio
+# 9. Or run in LangGraph Studio
 pip install "langgraph-cli[inmem]"
 langgraph dev
 ```
@@ -548,11 +561,12 @@ For detailed database setup and SQL schema, see **[SETUP.md](./SETUP.md)**.
 - **Observability** — LangGraph Studio visualizes execution in real-time
 - **Extensibility** — New nodes (e.g., a "competitor analysis" agent) can be added without rewiring existing logic
 
-### Why H3 over raw lat/lng lookups?
+### Why PostGIS over H3?
 
-- **O(1) lookup** — `grid_id` primary key vs. O(n) nearest-neighbor scans
-- **Consistent aggregation** — Equal-area hexagons enable fair comparison across sites
-- **Neighbor queries** — `h3.grid_disk()` gives k-ring neighbors without DB round-trips
+- **Native spatial indexing** — GIST index with `<->` operator gives O(log n) nearest-neighbor
+- **No external dependency** — PostGIS ships with PostgreSQL, no separate C library (H3) needed
+- **Flexible queries** — `ST_DWithin` for radius/catchment, `<->` for nearest, all in SQL
+- **Simpler data model** — `id` primary key (IND_XXXXXXX) vs. hex-encoded H3 cell IDs
 
 ### Why deterministic scoring?
 

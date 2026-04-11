@@ -39,7 +39,6 @@ class Settings(BaseSettings):
     # ── App ──────────────────────────────────────────────────────────────
     app_env: Literal["development", "staging", "production"] = "development"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
-    h3_resolution: int = 8
 
 
 @functools.lru_cache(maxsize=1)

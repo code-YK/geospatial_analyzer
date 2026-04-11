@@ -33,7 +33,7 @@ class ScoreRequest(BaseModel):
 class WhatIfRequest(BaseModel):
     """POST /score/what-if request body."""
 
-    h3_id: str
+    site_id: str
     current_weights: WeightConfig
     modified_weights: WeightConfig
 

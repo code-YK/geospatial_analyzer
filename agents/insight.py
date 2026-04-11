@@ -79,8 +79,7 @@ def _build_user_prompt(state: AgentState, intent: str) -> str:
             use_case=state.get("use_case", ""),
             state=getattr(features, "state", "N/A") if features else "N/A",
             district=getattr(features, "district", "N/A") if features else "N/A",
-            area_name=getattr(features, "area_name", "N/A") if features else "N/A",
-            grid_id=getattr(features, "grid_id", "N/A") if features else "N/A",
+            site_id=getattr(features, "id", "N/A") if features else "N/A",
             lat=getattr(features, "latitude", 0) if features else 0,
             lng=getattr(features, "longitude", 0) if features else 0,
             population_density=getattr(features, "population_density", "N/A") if features else "N/A",
@@ -107,8 +106,7 @@ def _build_user_prompt(state: AgentState, intent: str) -> str:
             use_case=state.get("use_case", ""),
             state=getattr(features, "state", "N/A") if features else "N/A",
             district=getattr(features, "district", "N/A") if features else "N/A",
-            area_name=getattr(features, "area_name", "N/A") if features else "N/A",
-            grid_id=getattr(features, "grid_id", "N/A") if features else "N/A",
+            site_id=getattr(features, "id", "N/A") if features else "N/A",
             lat=getattr(features, "latitude", 0) if features else 0,
             lng=getattr(features, "longitude", 0) if features else 0,
             population_density=getattr(features, "population_density", "N/A") if features else "N/A",
@@ -123,7 +121,7 @@ def _build_user_prompt(state: AgentState, intent: str) -> str:
         table_lines = []
         for i, site in enumerate(comparison or [], 1):
             table_lines.append(
-                f"  #{i} Grid {site.grid_id}: "
+                f"  #{i} Site {site.id}: "
                 f"score={site.site_readiness_score:.1f}"
             )
 
@@ -139,7 +137,7 @@ def _build_user_prompt(state: AgentState, intent: str) -> str:
         for i, hs in enumerate(hotspots or [], 1):
             table_lines.append(
                 f"  #{i} {hs.district}, {hs.state} "
-                f"(Grid {hs.grid_id}): score={hs.site_readiness_score:.1f}"
+                f"(Site {hs.id}): score={hs.site_readiness_score:.1f}"
             )
 
         state_label = state.get("state_name") or "India"

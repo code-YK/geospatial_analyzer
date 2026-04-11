@@ -91,7 +91,7 @@ async def score_what_if(request: WhatIfRequest) -> WhatIfResponse:
     try:
         factory = get_session_factory()
         async with factory() as db:
-            precomputed = await fetch_precomputed_scores(request.h3_id, db)
+            precomputed = await fetch_precomputed_scores(request.site_id, db)
     except Exception as exc:
         raise HTTPException(status_code=404, detail=f"Site not found: {exc}")
 

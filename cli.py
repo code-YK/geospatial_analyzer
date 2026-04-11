@@ -78,10 +78,8 @@ def _get_site_input() -> SiteInput:
     console.print("[bold]Step 1/3 — Site Location[/]")
     lat = FloatPrompt.ask("  Enter latitude", default=23.0225)
     lng = FloatPrompt.ask("  Enter longitude", default=72.5714)
-    h3_raw = Prompt.ask("  Enter H3 grid ID (or press Enter to auto-compute)", default="")
-    h3_id = h3_raw.strip() if h3_raw.strip() else None
     console.print()
-    return SiteInput(lat=lat, lng=lng, h3_id=h3_id)
+    return SiteInput(lat=lat, lng=lng)
 
 
 def _get_weights(use_case: str) -> Optional[WeightConfig]:
@@ -190,7 +188,7 @@ def _render_comparison(result: dict):
 
     table = Table(title="Site Comparison (Ranked)", show_header=True, header_style="bold cyan")
     table.add_column("Rank", justify="center", width=5)
-    table.add_column("Grid ID", min_width=18)
+    table.add_column("Site ID", min_width=18)
     table.add_column("Lat", justify="right")
     table.add_column("Lng", justify="right")
     table.add_column("Score", justify="right", style="bold")
@@ -199,7 +197,7 @@ def _render_comparison(result: dict):
         style = "bold green" if i == 1 else "white"
         table.add_row(
             f"#{i}",
-            site.grid_id,
+            site.id,
             f"{site.lat:.4f}",
             f"{site.lng:.4f}",
             f"{site.site_readiness_score:.1f}",
@@ -223,9 +221,8 @@ def _render_hotspots(result: dict):
     table = Table(title="Top Hotspot Locations", show_header=True, header_style="bold cyan")
     table.add_column("Rank", justify="center", width=5)
     table.add_column("District", min_width=15)
-    table.add_column("Area", min_width=15)
     table.add_column("State", min_width=12)
-    table.add_column("Grid ID", min_width=18)
+    table.add_column("Site ID", min_width=18)
     table.add_column("Score", justify="right", style="bold")
 
     for i, hs in enumerate(hotspots, 1):
@@ -233,9 +230,8 @@ def _render_hotspots(result: dict):
         table.add_row(
             f"#{i}",
             hs.district,
-            hs.area_name or "—",
             hs.state,
-            hs.grid_id,
+            hs.id,
             f"{hs.site_readiness_score:.1f}",
             style=style,
         )

@@ -58,8 +58,8 @@ Max 150 words.
 INSIGHT_SCORE_USER_PROMPT = """\
 Use case: {use_case}
 
-Site location: {state}, {district} ({area_name})
-Grid ID: {grid_id}
+Site location: {state}, {district}
+Site ID: {site_id}
 Coordinates: ({lat}, {lng})
 Population density: {population_density}
 

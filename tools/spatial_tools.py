@@ -1,14 +1,14 @@
 """
-tools/spatial_tools.py — H3 indexing + PostGIS spatial queries.
+tools/spatial_tools.py — PostGIS spatial queries.
+
+All spatial operations use PostGIS. No H3 dependency.
 """
 
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
-import h3
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.config import get_settings
 from core.logger import get_logger
 from models.site import (
     CatchmentResult,
@@ -22,42 +22,37 @@ from scoring.engine import compute_final_score
 logger = get_logger(__name__)
 
 
-# ── H3 Utilities ──────────────────────────────────────────────────────────
-
-def lat_lng_to_h3(lat: float, lng: float, resolution: int = 8) -> str:
-    """Convert lat/lng to an H3 index at the given resolution."""
-    return h3.latlng_to_cell(lat, lng, resolution)
-
-
-def h3_to_lat_lng(h3_id: str) -> Tuple[float, float]:
-    """Get centroid (lat, lng) from an H3 index."""
-    lat, lng = h3.cell_to_latlng(h3_id)
-    return lat, lng
-
-
 # ── Database Spatial Queries ──────────────────────────────────────────────
 
-async def get_neighboring_cells(
-    h3_id: str,
-    k_rings: int = 2,
+async def get_neighboring_sites(
+    lat: float,
+    lng: float,
+    radius_km: float = 2.0,
     db: Optional[AsyncSession] = None,
 ) -> List[SiteFeatures]:
     """
-    Return k-ring neighbours of a cell from the database.
+    Return all sites within ``radius_km`` of the given coordinates.
 
-    Uses the H3 library to compute neighbour IDs, then fetches matching
-    rows from PostgreSQL.
+    Uses PostGIS ``ST_DWithin`` for efficient spatial query.
     """
-    neighbor_ids = list(h3.grid_disk(h3_id, k_rings))
-
     if db is None:
         return []
 
-    placeholders = ", ".join(f":id_{i}" for i in range(len(neighbor_ids)))
-    query = text(f"SELECT * FROM site_features WHERE grid_id IN ({placeholders})")
-    params = {f"id_{i}": nid for i, nid in enumerate(neighbor_ids)}
+    radius_meters = radius_km * 1000.0
 
-    result = await db.execute(query, params)
+    query = text("""
+        SELECT *
+        FROM site_features
+        WHERE ST_DWithin(
+            geom::geography,
+            ST_SetSRID(ST_MakePoint(:lng, :lat), 4326)::geography,
+            :radius_m
+        )
+    """)
+    result = await db.execute(
+        query,
+        {"lat": lat, "lng": lng, "radius_m": radius_meters},
+    )
     rows = result.mappings().fetchall()
 
     return [SiteFeatures(**dict(row)) for row in rows]
@@ -71,8 +66,8 @@ async def detect_hotspots(
     db: Optional[AsyncSession] = None,
 ) -> List[HotspotResult]:
     """
-    For a given state, fetch all H3 cells, compute final scores,
-    and return the top_n cells ranked by site_readiness_score.
+    For a given state, fetch all sites, compute final scores,
+    and return the top_n sites ranked by site_readiness_score.
 
     Uses PostGIS spatial index for efficient state-level querying.
     """
@@ -81,7 +76,7 @@ async def detect_hotspots(
 
     query = text(
         """
-        SELECT grid_id, latitude, longitude, state, district, area_name,
+        SELECT id, latitude, longitude, state, district,
                demand_score, accessibility_score, competition_score,
                suitability_score, risk_score, infrastructure_score
         FROM site_features
@@ -97,7 +92,7 @@ async def detect_hotspots(
     for row in rows:
         row_dict = dict(row)
         precomputed = PrecomputedScores(
-            grid_id=row_dict["grid_id"],
+            id=row_dict["id"],
             demand_score=row_dict.get("demand_score", 0) or 0,
             accessibility_score=row_dict.get("accessibility_score", 0) or 0,
             competition_score=row_dict.get("competition_score", 0) or 0,
@@ -115,12 +110,11 @@ async def detect_hotspots(
 
         hotspots.append(
             HotspotResult(
-                grid_id=row_dict["grid_id"],
+                id=row_dict["id"],
                 lat=row_dict.get("latitude", 0) or 0,
                 lng=row_dict.get("longitude", 0) or 0,
                 state=row_dict.get("state", ""),
                 district=row_dict.get("district", ""),
-                area_name=row_dict.get("area_name", ""),
                 site_readiness_score=site_score.site_readiness_score,
                 precomputed_scores=precomputed,
             )
@@ -137,21 +131,22 @@ async def detect_hotspots(
 
 
 async def catchment_analysis(
-    h3_id: str,
+    lat: float,
+    lng: float,
+    site_id: str,
     radius_km: float,
     db: Optional[AsyncSession] = None,
 ) -> CatchmentResult:
     """
-    Return all H3 cells within ``radius_km`` of the given cell.
+    Return all sites within ``radius_km`` of the given coordinates.
 
     Uses PostGIS ``ST_DWithin`` for the spatial query.
     """
-    center_lat, center_lng = h3_to_lat_lng(h3_id)
     radius_meters = radius_km * 1000.0
 
     if db is None:
         return CatchmentResult(
-            center_h3_id=h3_id,
+            center_id=site_id,
             radius_km=radius_km,
             cell_count=0,
             cells=[],
@@ -170,7 +165,7 @@ async def catchment_analysis(
     )
     result = await db.execute(
         query,
-        {"lat": center_lat, "lng": center_lng, "radius_m": radius_meters},
+        {"lat": lat, "lng": lng, "radius_m": radius_meters},
     )
     rows = result.mappings().fetchall()
 
@@ -186,7 +181,7 @@ async def catchment_analysis(
         avg_score = sum(scores) / len(scores)
 
     return CatchmentResult(
-        center_h3_id=h3_id,
+        center_id=site_id,
         radius_km=radius_km,
         cell_count=len(cells),
         cells=cells,

@@ -47,7 +47,6 @@ async def fetch_features_node(state: AgentState) -> dict:
             features = await fetch_site_features(
                 lat=site_input.lat,
                 lng=site_input.lng,
-                h3_id=site_input.h3_id,
                 db=db,
             )
             updates["site_features"] = features
@@ -71,7 +70,7 @@ async def fetch_scores_node(state: AgentState) -> dict:
         factory = get_session_factory()
         async with factory() as db:
             scores = await fetch_precomputed_scores(
-                h3_id=features.grid_id,
+                site_id=features.id,
                 db=db,
             )
             updates["precomputed_scores"] = scores
@@ -126,11 +125,10 @@ async def compute_score_node(state: AgentState) -> dict:
                         comp_features = await fetch_site_features(
                             lat=comp_site.lat,
                             lng=comp_site.lng,
-                            h3_id=comp_site.h3_id,
                             db=db,
                         )
                         comp_precomputed = await fetch_precomputed_scores(
-                            h3_id=comp_features.grid_id,
+                            site_id=comp_features.id,
                             db=db,
                         )
                         comp_score = compute_final_score(

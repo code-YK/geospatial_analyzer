@@ -58,7 +58,7 @@ This will install all dependencies defined in `pyproject.toml`:
 - **FastAPI** + **Uvicorn** (API server)
 - **SQLAlchemy 2.0** (async) + **asyncpg** (PostgreSQL async driver)
 - **LangGraph** + **LangChain** (Groq, OpenAI, Anthropic)
-- **H3** (spatial indexing)
+- **Pandas** (data loading)
 - **Typer** + **Rich** (CLI)
 - **Pydantic** + **pydantic-settings** (config & validation)
 
@@ -87,7 +87,9 @@ GROQ_API_KEY=your_groq_api_key_here
 # App
 APP_ENV=development
 LOG_LEVEL=INFO
-H3_RESOLUTION=8
+
+# Data
+CSV_DATA_PATH=data/
 ```
 
 > **Note:** To use a different LLM provider, change `LLM_PROVIDER` to `openai`, `anthropic`, or `ollama` and set the corresponding API key.
@@ -137,13 +139,33 @@ alembic downgrade base
 alembic revision -m "add_new_column"
 ```
 
-> **Note:** The data pipeline (ETL) for loading geospatial data into the `site_features` table is separate and not included in this codebase. Ensure data is loaded before running the analyzer.
+---
+
+## 6. Load Data into PostgreSQL
+
+Use the `sync_job.py` script to load CSV data into the `site_features` table:
+
+```bash
+# Auto-detect first .csv in data/ folder
+python sync_job.py
+
+# Specify a CSV file explicitly
+python sync_job.py --file data/india_sites.csv
+
+# Truncate table before loading (fresh load)
+python sync_job.py --truncate
+
+# Custom batch size (default: 1000)
+python sync_job.py --batch-size 500
+```
+
+> **Note:** CSV must contain required columns: `id`, `latitude`, `longitude`, `state`, `district`. The `geom` column is auto-generated from lat/lng during loading.
 
 ---
 
-## 6. Running the Application
+## 7. Running the Application
 
-### 6.1 Run the FastAPI Server
+### 7.1 Run the FastAPI Server
 
 ```bash
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
@@ -154,7 +176,7 @@ The API will be available at:
 - **ReDoc:** http://localhost:8000/redoc
 - **Health Check:** http://localhost:8000/
 
-### 6.2 Run the CLI
+### 7.2 Run the CLI
 
 ```bash
 python -m cli
@@ -167,13 +189,13 @@ geo-cli
 
 ---
 
-## 7. API Endpoints
+## 8. API Endpoints
 
 | Method | Endpoint | Description |
 |---|---|---|
 | `GET` | `/` | Health check |
-| `GET` | `/sites/{h3_id}` | Fetch features for a specific H3 cell |
-| `GET` | `/sites/nearest/?lat=&lng=` | Find nearest H3 cell by coordinates |
+| `GET` | `/sites/{site_id}` | Fetch features for a specific site |
+| `GET` | `/sites/nearest/?lat=&lng=` | Find nearest site by coordinates |
 | `POST` | `/score` | Score a single site (full graph run) |
 | `POST` | `/score/what-if` | Compare two weight configurations |
 | `POST` | `/compare` | Compare and rank 2–5 sites |
@@ -206,20 +228,23 @@ curl -X POST http://localhost:8000/compare \
 
 ---
 
-## 8. Project Structure
+## 9. Project Structure
 
 ```
 geo_site_v2/
 ├── main.py                       # FastAPI app entry point
 ├── cli.py                        # Menu-based CLI (Typer + Rich)
+├── sync_job.py                   # CSV → PostgreSQL data loader
 ├── pyproject.toml                # Dependencies & project config
 ├── .env.example                  # Environment template
 ├── SETUP.md                      # This file
+├── DERIVED_COLUMNS.md            # Layer 7 score formulas
 │
 ├── core/
 │   ├── __init__.py
 │   ├── config.py                 # pydantic-settings config
 │   ├── database.py               # Async SQLAlchemy engine
+│   ├── logger.py                 # Centralized logging
 │   └── exceptions.py             # Custom exceptions
 │
 ├── llm/
@@ -238,9 +263,9 @@ geo_site_v2/
 │
 ├── tools/
 │   ├── __init__.py
-│   ├── site_tools.py             # DB fetch functions
+│   ├── site_tools.py             # DB fetch functions (PostGIS)
 │   ├── scoring_tools.py          # Score wrappers
-│   ├── spatial_tools.py          # H3 + PostGIS tools
+│   ├── spatial_tools.py          # PostGIS spatial queries
 │   ├── explainability_tools.py   # Breakdown + what-if
 │   └── config_tools.py           # Weight validation
 │
@@ -270,7 +295,7 @@ geo_site_v2/
 
 ---
 
-## 9. Supported LLM Providers
+## 10. Supported LLM Providers
 
 | Provider | `.env` Config | Required Package |
 |---|---|---|
@@ -281,7 +306,7 @@ geo_site_v2/
 
 ---
 
-## 10. Quick Start Summary
+## 11. Quick Start Summary
 
 ```bash
 # 1. Navigate to project
@@ -298,12 +323,16 @@ pip install -e .
 cp .env.example .env
 # Edit .env with your DB credentials and GROQ_API_KEY
 
-# 5. Set up PostgreSQL (ensure DB + extensions + table exist)
+# 5. Set up PostgreSQL (ensure DB exists)
+alembic upgrade head
 
-# 6. Start API server
+# 6. Load data
+python sync_job.py --file data/india_sites.csv
+
+# 7. Start API server
 uvicorn main:app --reload --port 8000
 
-# 7. Or run CLI
+# 8. Or run CLI
 python -m cli
 ```
 
@@ -315,6 +344,6 @@ python -m cli
 |---|---|
 | `ModuleNotFoundError` | Ensure you ran `pip install -e .` from the `geo_site_v2/` root |
 | DB connection error | Verify `DATABASE_URL` in `.env` and that PostgreSQL is running |
-| `h3` import error | Run `pip install h3` — ensure C compiler is available on your system |
-| LLM timeout | Check your API key and network connection |
 | PostGIS missing | Run `CREATE EXTENSION postgis;` in your database |
+| LLM timeout | Check your API key and network connection |
+| Sync job fails | Ensure CSV has required columns: `id`, `latitude`, `longitude`, `state`, `district` |
