@@ -4,7 +4,7 @@ models/request.py — API request/response models for FastAPI routes.
 
 from typing import List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from models.site import (
     HotspotResult,
@@ -97,3 +97,49 @@ class ErrorResponse(BaseModel):
 
     detail: str
     error_type: str = "GeoAnalyzerError"
+
+
+# ── Checkpoint Endpoint Models ─────────────────────────────────────────────
+
+class CheckpointScoreRequest(BaseModel):
+    """Request body for POST /checkpoint/score."""
+
+    site_input: SiteInput
+    use_case: str = Field(
+        ...,
+        description="Business use case key e.g. 'retail', 'ev_charging'",
+    )
+    weights: Optional[WeightConfig] = Field(
+        default=None,
+        description=(
+            "Optional scoring weights. If omitted, advisory node recommends defaults."
+        ),
+    )
+
+    @field_validator("use_case")
+    @classmethod
+    def use_case_must_be_valid(cls, v: str) -> str:
+        from scoring.weights import VALID_USE_CASES
+
+        if v not in VALID_USE_CASES:
+            raise ValueError(
+                f"Invalid use_case '{v}'. "
+                f"Valid options: {sorted(VALID_USE_CASES)}"
+            )
+        return v
+
+
+class CheckpointScoreResponse(BaseModel):
+    """Response body for POST /checkpoint/score."""
+
+    site_id: Optional[str] = None
+    location: str
+    use_case: str
+    final_score: Optional[float] = None
+    score_breakdown: Optional[ScoreBreakdown] = None
+    weights_used: Optional[WeightConfig] = None
+    insight_text: Optional[str] = None
+    advisory_text: Optional[str] = None
+    validation_warnings: List[str] = Field(default_factory=list)
+    thread_id: str
+

@@ -2,7 +2,7 @@
 agents/state.py — AgentState TypedDict for the LangGraph state graph.
 """
 
-from typing import List, Optional, TypedDict
+from typing import List, Literal, Optional, TypedDict
 
 from models.site import (
     HotspotResult,
@@ -25,6 +25,7 @@ class AgentState(TypedDict, total=False):
 
     # ── Input ─────────────────────────────────────────────────────────
     thread_id: str
+    entry_point: Literal["chat", "checkpoint"]  # default: "chat"
     use_case: str  # "retail" | "ev_charging" | "warehouse" | ... (any key in USE_CASE_CATALOG)
     site_input: SiteInput
     user_weights: Optional[WeightConfig]

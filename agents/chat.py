@@ -61,6 +61,28 @@ async def chat_node(state: AgentState) -> dict:
     5. Append assistant response to conversation_history
     6. Trim history to MAX_HISTORY turns
     """
+
+    # ── Checkpoint short-circuit ──────────────────────────────────────────
+    # If this run was initiated via /checkpoint/score, site_input and
+    # use_case are already populated. Skip LLM intent detection entirely.
+    if state.get("entry_point") == "checkpoint":
+        if state.get("site_input") and state.get("use_case"):
+            logger.info("Chat node: checkpoint entry detected, bypassing LLM")
+            return {
+                "current_node": "chat",
+                "chat_intent": "needs_graph",
+            }
+        else:
+            # Malformed checkpoint call — missing required fields
+            return {
+                "current_node": "chat",
+                "error": (
+                    "Checkpoint entry requires both site_input and use_case. "
+                    "Use POST /checkpoint/score with lat, lng, and use_case."
+                ),
+            }
+    # ── End short-circuit ─────────────────────────────────────────────────
+
     updates: dict = {"current_node": "chat"}
 
     raw_message = state.get("raw_user_message", "")
@@ -145,6 +167,16 @@ async def chat_response_node(state: AgentState) -> dict:
     response and set analysis_complete = True.
     """
     updates: dict = {"current_node": "chat_response"}
+
+    # ── Checkpoint post-insight guard ─────────────────────────────────────
+    # Checkpoint callers read directly from state fields.
+    # Do NOT overwrite final_score, score_breakdown, or insight_text.
+    # Do NOT set chat_response — the API route serializes state directly.
+    if state.get("entry_point") == "checkpoint":
+        logger.info("Chat node: checkpoint post-insight — skipping chat formatting")
+        updates["analysis_complete"] = True
+        return updates
+    # ── End checkpoint guard ──────────────────────────────────────────────
 
     insight = state.get("insight_text", "")
     warnings = state.get("validation_warnings", [])

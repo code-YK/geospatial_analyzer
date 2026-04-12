@@ -102,3 +102,5 @@ async def score_what_if(request: WhatIfRequest) -> WhatIfResponse:
     )
 
     return WhatIfResponse(result=result)
+
+

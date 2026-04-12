@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from api.routes import sites, scoring, comparison, hotspots
+from api.routes import sites, scoring, comparison, hotspots, checkpoint
 from core.config import get_settings
 from core.database import dispose_engine, get_engine
 from core.logger import setup_logging, get_logger
@@ -67,6 +67,7 @@ app.include_router(sites.router)
 app.include_router(scoring.router)
 app.include_router(comparison.router)
 app.include_router(hotspots.router)
+app.include_router(checkpoint.router)
 
 
 @app.get("/", tags=["Health"])

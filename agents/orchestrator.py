@@ -32,6 +32,22 @@ async def orchestrator_node(state: AgentState) -> dict:
     updates: dict = {"current_node": "orchestrator"}
     logger.info("Orchestrator node invoked")
 
+    # ── Checkpoint fast-path ──────────────────────────────────────────────
+    # For checkpoint entries, intent is always score_site.
+    # site_input and use_case are already validated by the API route.
+    # Skip all orchestrator parsing and go straight to routing.
+    if state.get("entry_point") == "checkpoint":
+        logger.info(
+            "Orchestrator: checkpoint fast-path | "
+            "use_case=%s | lat=%s, lng=%s",
+            state.get("use_case"),
+            state["site_input"].lat,
+            state["site_input"].lng,
+        )
+        updates["intent"] = "score_site"
+        return updates
+    # ── End fast-path ─────────────────────────────────────────────────────
+
     try:
         # ── 1. Validate coordinates ──────────────────────────────────
         site_input = state.get("site_input")
